@@ -1,0 +1,11 @@
+{
+  "name": "DeckyXMB",
+  "author": "InsaneCallum",
+  "flags": [],
+  "api_version": 1,
+  "publish": {
+    "tags": ["launcher", "ui", "home", "theme"],
+    "description": "Replaces the Steam Deck home screen with a PS3-style XrossMediaBar.",
+    "image": ""
+  }
+}
