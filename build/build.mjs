@@ -26,6 +26,7 @@ const common = {
   format: "esm",
   target: "chrome100",
   jsx: "automatic",
+  loader: { ".wav": "dataurl" }, // (the XMB's sound effects, src/sounds)
   define: { __PLUGIN_NAME__: JSON.stringify(pluginName) },
   plugins: [externals],
   logLevel: "info",

@@ -1,7 +1,7 @@
 DeckyXMB adapts techniques and code from Spindeck
 (https://github.com/justinca92/spindeck): the home-route patch, Steam library
-store access, the native game context-menu lookup, Steam UI sound playback,
-the error boundary and the offline Decky shims. Spindeck's licence follows.
+store access, the native game context-menu lookup, the error boundary and the
+offline Decky shims. Spindeck's licence follows.
 
 BSD 3-Clause License
 

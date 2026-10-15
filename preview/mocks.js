@@ -71,8 +71,17 @@
         else if (name === "SECONDARY") q.onSecondaryButton?.(ev);
         else if (name === "START") q.onMenuButton?.(ev);
       };
+      // (a key let go: the button up, for △ held)
+      const onUp = (k) => {
+        const name = KEYS[k.key] ?? KEYS[k.key.toLowerCase?.()];
+        if (name) p.current.onButtonUp?.({ detail: { button: GamepadButton[name] }, preventDefault() {}, stopPropagation() {}, currentTarget: ref.current });
+      };
       window.addEventListener("keydown", onKey);
-      return () => window.removeEventListener("keydown", onKey);
+      window.addEventListener("keyup", onUp);
+      return () => {
+        window.removeEventListener("keydown", onKey);
+        window.removeEventListener("keyup", onUp);
+      };
     }, []);
     return R.createElement("div", { ref, style: props.style, className: props.className }, props.children);
   }
@@ -178,7 +187,16 @@
     return btoa(s);
   };
 
+  // The backend's saved data (trophy lists, DLC groups...), kept in sessionStorage so a reload finds it.
+  const cacheOf = (kind) => JSON.parse(sessionStorage.getItem("xmbCache." + kind) ?? "{}");
   const mockBackend = {
+    cache_get: (kind, key) => cacheOf(kind)[key] ?? null,
+    cache_put: (kind, key, value) => {
+      const c = cacheOf(kind);
+      c[key] = value;
+      sessionStorage.setItem("xmbCache." + kind, JSON.stringify(c));
+      return true;
+    },
     // RetroAchievements (Emuchievements' account): one game played on it.
     retro_games: () => ({ games: [{ id: 2845, title: "Jak II", console: "PlayStation 2", total: 40, earned: 13 }], error: "" }),
     retro_achievements: () =>
@@ -192,6 +210,14 @@
         hidden: false,
         rarity: [62, 30, 12, 5, 2][i],
       })),
+    // Steam Hunters' groups: two DLC packs for every other game (the last six of its trophies), none for the rest.
+    trophy_groups: (appid) =>
+      appid % 2
+        ? []
+        : [
+            { name: "Extra Content Pack", appid: null, ids: ["ACH_12", "ACH_13", "ACH_14"] },
+            { name: "Season Pass Episode", appid: null, ids: ["ACH_15", "ACH_16", "ACH_17"] },
+          ],
     get_soundtrack: (appid) => {
       const [, , titles, downloaded] = music.find((m) => m[0] === appid) ?? [0, "", [], false];
       return {
@@ -213,7 +239,9 @@
       { id: "mock-dynamic", name: "Mock Dynamic Theme", author: "Someone Else", dynamic: true },
     ],
     get_theme_preview: async (id) =>
-      (await localThemes()).some((t) => t.id === id) ? `themes/${id}/screenshot.png` : "https://cdn.cloudflare.steamstatic.com/steam/apps/1145360/library_hero.jpg",
+      (await localThemes()).some((t) => t.id === id)
+        ? `themes/${id}/screenshot.png`
+        : "https://cdn.cloudflare.steamstatic.com/steam/apps/1145360/library_hero.jpg",
     get_theme_scene: async (id) => ({ scene: await (await fetch(`themes/${id}/scene.json`)).text(), script: await fileB64(`themes/${id}/script.vsmx`) }),
     get_theme_texture: (id, i) => fileB64(`themes/${id}/tex${i}.z`),
     get_theme: async (id) => {

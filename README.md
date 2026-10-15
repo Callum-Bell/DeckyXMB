@@ -16,7 +16,7 @@ Turning off "Use XMB as Home" or uninstalling the plugin brings Steam's normal h
 PS3 themes, packages and `.rap` files are not included. Use your own.
 
 <p align="center">
-    <a href="https://dl.insanux.com/?mod=U798L1uB0QK94kX">
+    <a href="https://dl.insanux.com/?mod=bP24m39wL8gD4B9">
         <img alt="Download" src="https://img.shields.io/badge/Download-Here-blue?style=for-the-badge">
     </a>
     <a href="https://www.patreon.com/c/InsaneCallum">
@@ -44,15 +44,18 @@ Recorded on a Steam Machine.
   - Installs Official/Unofficial **PS3 themes** (`.p3t`, or the theme inside a PS3 `.pkg`), including **dynamic themes** with animated 3D backgrounds, drawn with WebGL and directed by the theme's own script.
   - Licence-locked themes are unlocked with their `.rap`.
   - A theme's icons replace the XMB's own, and its background can be dimmed or drawn at a lower resolution to save power.
+  - The PS3's own sound effects (cursor, select, back, error, trophies) replace Steam's UI sounds, in the XMB and the rest of Big Picture. A theme's own sound effects (cursor, select, back, options menu, questions) replace those, where it has them.
 - **Game**
   - Folders for All Games, Favorites, Locally Installed Games and your Steam collections, each one switched on or off with △.
   - Below the folders: your recently played games.
   - The selected game's art fades in behind the menu, like PS3 game backgrounds.
-  - ✕ on a game opens its options: Play, Achievements, Game Details, Move to Video and More Options (Steam's own menu).
+  - Starting a game plays the PS3's start-up: the menu zooms away and the game starts behind the XMB's background; once it's ready, the screen goes black but for the wave's sparkles, which spread towards you and fade, and the game is shown. Steam's launching page is never seen.
+  - ✕ on a game starts it; △ opens its options: Play, Trophies, Game Details, Move to Video and More Options (Steam's own menu). What ✕ does can be changed in the Quick Access panel.
 - **Video:** an empty column for the "games" you choose. Move a game here with Move to Video, and back with Move to Game. Such as YouTube/Plex.
 - **Trophies**
   - Steam achievements shown as PS3 trophies. Rarity sets the grade: under 10% of players is gold, under 35% silver, otherwise bronze. Earning everything unlocks platinum.
-  - Achievement Collection (under Network) lists every game's trophies in the XMB, or on a full trophy page.
+  - Trophy Collection (under Network) lists every game's trophies in the XMB, or on a full trophy page. It opens on the game you played last.
+  - **Group Content:** a game's trophies split by the DLC they came with (base game first, then each DLC with its own progress), from [Steam Hunters](https://steamhunters.com). Turn it on or off with △ on a game's trophies.
   - Non-Steam games show their [RetroAchievements](https://retroachievements.org) trophies with [Emuchievements](https://github.com/Xriuk/Emuchievements): games it can't match are matched by name, through the account you've signed in to Emuchievements with.
 - **Screenshots:** the ones on the Deck and the ones uploaded to your Steam profile, by game, in a picture grid.
 - **Soundtracks:** the Steam soundtracks you own, with their track lists; downloaded tracks play right in the XMB.
@@ -62,7 +65,7 @@ Recorded on a Steam Machine.
 - **Settings:** the PS3's settings, made with Steam's own:
   - System Update; Theme; Date and Time; Display; Sound; Controller; Bluetooth; Network.
   - Controller Symbols sets the button symbols shown throughout Steam: DualShock 3, DualShock 2 or Steam's own (CSSLoader Icon Replacers will work).
-- **Game music on hover:** with [ThemeDeck](https://github.com/BrenticusMaximus/ThemeDeck), resting on a game plays its ThemeDeck track. It stops when a game launches.
+- **Game music on hover:** with [ThemeDeck](https://github.com/BrenticusMaximus/ThemeDeck), resting on a game plays its ThemeDeck track. It plays on while a game starts, fading out as the game comes on.
 - **Power items** (Suspend, Restart, Switch to Desktop, Turn Off) ask first, as the PS3 does.
 
 ## Controls
@@ -94,6 +97,8 @@ In the preview the arrow keys are the D-pad. Enter = ✕, Esc = ○, Y = △, X 
 Made by **InsaneCallum**. If you enjoy it, you can support me on [Patreon](https://www.patreon.com/c/InsaneCallum).
 
 The DualShock controller symbols come from [Button Prompts Galore](https://github.com/Callum-Bell/sdh-controller-prompts) (ZeusOfTheCrows and InsaneCallum, CC0).
+
+DLC trophy groups come from the [Steam Hunters](https://steamhunters.com) API, found through BossSloth's [SteamHunter plugin](https://github.com/BossSloth/SteamHunter-plugin).
 
 The home-route patch, Steam store access and native menu lookup are adapted from
 [Spindeck](https://github.com/justinca92/spindeck) (BSD-3-Clause). See `NOTICE`.

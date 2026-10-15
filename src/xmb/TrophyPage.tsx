@@ -3,13 +3,29 @@
 // trophy is awarded for earning everything.
 import { Focusable, GamepadButton, Navigation } from "@decky/ui";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { loadTrophies, openSteamAchievements, showTrophiesInXMB, sortTrophies, Trophy, TROPHY_SORTS, trophyPageFromCollection, trophyGame } from "../library";
+import {
+  AchievementProgress,
+  countOf,
+  lastTrophies,
+  loadTrophies,
+  loadTrophyGroups,
+  openSteamAchievements,
+  showTrophiesInXMB,
+  sortTrophies,
+  Trophy,
+  TrophyGroup,
+  trophySections,
+  TROPHY_SORTS,
+  trophyPageFromCollection,
+  trophyGame,
+} from "../library";
 import { musicFocus, musicLeave } from "../music";
 import { formatDateTime } from "../datetime";
 import { updateSettings, useSettings } from "../settings";
 import { playSound } from "../sound";
 import { BASE_CSS, consume, FallbackImg, FONT, hideFooter, Hint, Marquee, Stage, useGamepadHandlers, useNow, useStageScale } from "./common";
 import { ThemedWave } from "./Wave";
+import { LOCKED_TROPHY } from "./locked";
 
 export type Tier = "platinum" | "gold" | "silver" | "bronze";
 const TIER_COLORS: Record<Tier, [string, string]> = {
@@ -38,6 +54,7 @@ interface Row {
   hidden: boolean;
   rarity?: number;
   progress?: { current: number; max: number };
+  group?: { art: string[]; count: AchievementProgress }; // a group's heading (Group Content): not a trophy, passed over
 }
 
 export function Cup({ tier, size, dim }: { tier: Tier; size: number; dim?: boolean }) {
@@ -81,7 +98,7 @@ function status(row: Row, long = false): string {
   return "Not earned";
 }
 
-/** The trophy's picture: a platinum cup, "?" while hidden, or its badge (greyed until earned). */
+/** The trophy's picture: the PS3's padlock till it's earned; then a platinum cup, or its badge. */
 function TrophyIcon({ row, size, cup }: { row: Row; size: number; cup: number }) {
   return (
     <div
@@ -91,24 +108,22 @@ function TrophyIcon({ row, size, cup }: { row: Row; size: number; cup: number })
         flex: "none",
         borderRadius: 5,
         overflow: "hidden",
-        background: "rgba(0,0,0,.3)",
+        background: row.achieved ? "rgba(0,0,0,.3)" : undefined, // (the padlock's tile is glass: what's behind shows)
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
       }}
     >
-      {row.tier === "platinum" ? (
-        <Cup tier="platinum" size={cup} dim={!row.achieved} />
-      ) : isSecret(row) || !row.image ? (
+      {!row.achieved ? (
+        <img src={LOCKED_TROPHY} draggable={false} style={{ width: "100%", height: "100%", display: "block" }} />
+      ) : row.tier === "platinum" ? (
+        <Cup tier="platinum" size={cup} />
+      ) : !row.image ? (
         <span className="xmb-text" style={{ fontSize: size / 2, opacity: 0.7 }}>
           ?
         </span>
       ) : (
-        <img
-          src={row.image}
-          draggable={false}
-          style={{ width: "100%", height: "100%", objectFit: "cover", filter: row.achieved ? "none" : "grayscale(1) brightness(.55)" }}
-        />
+        <img src={row.image} draggable={false} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
       )}
     </div>
   );
@@ -123,12 +138,13 @@ export function TrophyPage({ appid }: { appid: number }) {
   const game = useMemo(() => trophyGame(appid), [appid]);
 
   const [trophies, setTrophies] = useState<Trophy[] | null | "error">(null);
+  const [groups, setGroups] = useState<TrophyGroup[]>();
   // (the order chosen under Sort By in the XMB too: □ moves on to the next, for both)
   const [s] = useSettings();
   const sort = s.trophySort;
   const [sel, setSel] = useState(0);
   const [detail, setDetail] = useState(false);
-  const [switches] = useState(trophyPageFromCollection); // (opened from Achievement Collection: △ lists them in the XMB)
+  const [switches] = useState(trophyPageFromCollection); // (opened from Trophy Collection: △ lists them in the XMB)
 
   // Keep this game's music playing (picks up seamlessly from the XMB).
   useEffect(() => {
@@ -138,9 +154,12 @@ export function TrophyPage({ appid }: { appid: number }) {
 
   useEffect(() => {
     let live = true;
+    // (the list last read shown meanwhile, while it's read again)
+    void lastTrophies(appid).then((t) => live && t && setTrophies((had) => had ?? t));
     loadTrophies(appid)
       .then((t) => live && setTrophies(t))
       .catch(() => live && setTrophies("error"));
+    loadTrophyGroups(appid).then((g) => live && setGroups(g));
     return () => {
       live = false;
     };
@@ -153,7 +172,24 @@ export function TrophyPage({ appid }: { appid: number }) {
 
   const rows: Row[] = useMemo(() => {
     const label = (t: Trophy) => (t.hidden && !t.achieved ? HIDDEN_NAME : t.name);
-    const out: Row[] = sortTrophies(list, sort, label).map((t) => ({ ...t, key: t.id, tier: tierOf(t) }));
+    const rowsOf = (l: Trophy[]): Row[] => sortTrophies(l, sort, label).map((t) => ({ ...t, key: t.id, tier: tierOf(t) }));
+    // Group Content: each group under its heading (the base game's first), sorted within it.
+    const sections = game && groups ? trophySections(game, list, groups) : null;
+    const out: Row[] = sections
+      ? sections.flatMap((sec) => [
+          {
+            key: `__grp:${sec.key}`,
+            tier: "bronze" as Tier,
+            name: sec.name,
+            description: "",
+            achieved: false,
+            unlocked: 0,
+            hidden: false,
+            group: { art: sec.art, count: countOf(sec.trophies) },
+          },
+          ...rowsOf(sec.trophies),
+        ])
+      : rowsOf(list);
     if (list.length) {
       out.unshift({
         key: "__platinum",
@@ -166,7 +202,7 @@ export function TrophyPage({ appid }: { appid: number }) {
       });
     }
     return out;
-  }, [trophies, sort]);
+  }, [trophies, sort, groups, s.trophyGroups]);
 
   // Earned / total per tier, worked out once per load (not on every button press).
   const counts = useMemo(() => {
@@ -179,8 +215,24 @@ export function TrophyPage({ appid }: { appid: number }) {
     c.platinum = { got: allDone ? 1 : 0, total: list.length ? 1 : 0 };
     return c;
   }, [trophies]);
+  // The rows changing under the selection (groups arriving after the list): it stays on the same trophy, and never on a
+  // group's heading. (Not when the selection moved with them: Sort By goes back to the top.)
+  const anchor = useRef({ key: "", sel: 0 });
+  useEffect(() => {
+    const a = anchor.current;
+    if (a.sel === sel && a.key && rows[sel]?.key !== a.key) {
+      const i = rows.findIndex((r) => r.key === a.key);
+      if (i >= 0) return void setSel(i);
+    }
+    if (rows[sel]?.group) setSel(Math.min(sel + 1, rows.length - 1)); // (a heading is always followed by its trophies)
+  }, [rows]);
+  useEffect(() => void (anchor.current = { key: rows[sel]?.key ?? "", sel }));
+  // (passing over the groups' headings: on to the nearest trophy that way, else back the other)
   const move = (to: number) => {
-    const n = Math.max(0, Math.min(rows.length - 1, to));
+    const dir = to < sel ? -1 : 1;
+    let n = Math.max(0, Math.min(rows.length - 1, to));
+    while (rows[n]?.group && rows[n + dir]) n += dir;
+    while (rows[n]?.group && rows[n - dir]) n -= dir;
     if (n !== sel) {
       setSel(n);
       playSound("move");
@@ -346,9 +398,15 @@ export function TrophyPage({ appid }: { appid: number }) {
             {trophies === "error" && <Message text="Couldn't load achievements for this game." />}
             {Array.isArray(trophies) && !trophies.length && <Message text="This game has no achievements." />}
             <div className="trophy-scroll" style={{ transform: `translateY(${-top * ROW_H}px)` }}>
-              {rows.slice(from, to + 1).map((r, k) => (
-                <TrophyRow key={r.key} row={r} y={(from + k) * ROW_H} on={from + k === sel} />
-              ))}
+              {rows
+                .slice(from, to + 1)
+                .map((r, k) =>
+                  r.group ? (
+                    <GroupRow key={r.key} row={r} y={(from + k) * ROW_H} />
+                  ) : (
+                    <TrophyRow key={r.key} row={r} y={(from + k) * ROW_H} on={from + k === sel} />
+                  ),
+                )}
             </div>
           </div>
 
@@ -490,6 +548,37 @@ function TrophyRow({ row, y, on }: { row: Row; y: number; on: boolean }) {
           {status(row)}
         </div>
         <Cup tier={row.tier} size={30} dim={!row.achieved} />
+      </div>
+    </div>
+  );
+}
+
+/** A group's heading: its art (a DLC's), its name, and how much of it is earned. */
+function GroupRow({ row, y }: { row: Row; y: number }) {
+  const { art, count } = row.group!;
+  const pct = Math.floor((count.achieved / count.total) * 100);
+  return (
+    <div
+      style={{
+        position: "absolute",
+        left: 0,
+        top: y,
+        width: "100%",
+        height: ROW_H,
+        display: "flex",
+        alignItems: "flex-end",
+        gap: 16,
+        padding: "0 18px 8px",
+        boxSizing: "border-box",
+        borderBottom: "1px solid rgba(255,255,255,.3)",
+      }}
+    >
+      <FallbackImg srcs={art} style={{ width: 96, height: 45, objectFit: "cover", borderRadius: 3, flex: "none", boxShadow: "0 1px 4px rgba(0,0,0,.5)" }} />
+      <div className="xmb-text" style={{ flex: 1, minWidth: 0, fontSize: 18, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+        {row.name}
+      </div>
+      <div className="xmb-text" style={{ fontSize: 15, opacity: 0.85, flex: "none" }}>
+        {count.achieved} / {count.total} · {pct}%
       </div>
     </div>
   );

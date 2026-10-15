@@ -1,5 +1,5 @@
 // PS3 themes (.p3t): installing them (the backend unpacks them) and the active
-// theme's icons and background. "Original" (no theme) is the wave.
+// theme's icons, sounds and background. "Original" (no theme) is the wave.
 import { call, FileSelectionType, openFilePicker, toaster } from "@decky/api";
 import { fromBase64, sleep } from "./async";
 import { signal } from "./signal";
@@ -23,8 +23,17 @@ export interface Assets {
   id: string;
   key: string; // this load of it (a theme reinstalled while on show is loaded again)
   icons: Record<string, string>; // PS3 icon id → data URI
+  sounds: Record<string, string>; // PS3 sound effect id (se_cursor...) → data URI of its WAV
   background: string | null;
   scene?: { data: SceneData; script: Uint8Array } | null; // a dynamic theme's animated scene
+}
+
+/** What get_theme gives (with its theme.json): its icons, sounds and still background, as data URIs. */
+interface ThemeData {
+  iconData?: Record<string, string>;
+  soundData?: Record<string, string>;
+  backgroundData?: string | null;
+  scene?: boolean;
 }
 
 let installed: ThemeInfo[] = [];
@@ -76,22 +85,24 @@ function syncActive() {
     toast("Couldn't load theme", "Its files couldn't be read. Try installing it again.");
     updateSettings({ customTheme: assets?.id ?? "" });
   };
-  loaded = call<[string], { iconData?: Record<string, string>; backgroundData?: string | null; scene?: boolean } | null>("get_theme", id)
+  loaded = call<[string], ThemeData | null>("get_theme", id)
     .then(async (t) => {
       if (getSettings().customTheme !== id) return;
       const icons = t?.iconData ?? {};
+      const sounds = t?.soundData ?? {};
       const background = t?.backgroundData ?? null;
       // Decoded before they're shown, so they appear at once rather than one by one.
       await Promise.all([...Object.values(icons), background].map(decode));
       if (getSettings().customTheme !== id) return;
       if (!t) return failed();
-      if (!t.scene) return show({ id, key, icons, background });
+      if (!t.scene) return show({ id, key, icons, sounds, background });
       const s = await call<[string], { scene: string; script: string } | null>("get_theme_scene", id).catch(() => null);
       if (getSettings().customTheme !== id) return;
       const next: Assets = {
         id,
         key,
         icons,
+        sounds,
         background,
         scene: s ? { data: JSON.parse(s.scene), script: new Uint8Array(await (await fromBase64(s.script)).arrayBuffer()) } : null,
       };
@@ -325,6 +336,7 @@ const ICONS: Partial<Record<IconName, string[]>> = {
   browser: ["icon_browser"],
   chat: ["icon_chat"],
   info: ["icon_onlinemanual"],
+  quick: ["icon_game_setting"], // Quick Access, More Options (the PS3's Game Settings: a wrench and a controller)
 };
 
 /** The active theme's picture for an icon, if it has one. */

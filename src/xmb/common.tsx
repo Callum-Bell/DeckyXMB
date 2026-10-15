@@ -31,13 +31,93 @@ export function useGamepadHandlers<K extends string>(handlers: Record<K, Handler
 export const STAGE_W = 1280;
 export const STAGE_H = 800;
 
+// Pictures fetched and decoded ahead of being shown (a list's, either side of the selection): a row sliding on then has
+// its picture ready, rather than drawn (or its missing first choice tried) as it moves, which held its move up on the
+// Deck. Which of a picture's candidates loads is kept, so it's gone to straight away; the latest few are kept decoded.
+// (kept across restarts for the pictures whose first choice doesn't load: by that choice, so the key stays short)
+const PICKED_KEY = "DeckyXMB.pictures";
+const PICKED_MAX = 600;
+const picked = new Map<string, number>(); // candidates (joined) → the first that loads (its length: none does)
+const pickedBefore: Record<string, number> = (() => {
+  try {
+    return JSON.parse(localStorage.getItem(PICKED_KEY) ?? "{}");
+  } catch {
+    return {};
+  }
+})();
+let savingPicked: ReturnType<typeof setTimeout> | undefined;
+function pick(srcs: string[], i: number) {
+  const key = srcs.join("|");
+  if (picked.get(key) === i) return;
+  picked.set(key, i);
+  // (none loading isn't kept past this session: it may be only that it couldn't be fetched)
+  if (i >= srcs.length || (pickedBefore[srcs[0]] ?? 0) === i) return;
+  if (i) pickedBefore[srcs[0]] = i;
+  else delete pickedBefore[srcs[0]];
+  clearTimeout(savingPicked);
+  savingPicked = setTimeout(() => {
+    try {
+      const all = Object.entries(pickedBefore);
+      localStorage.setItem(PICKED_KEY, JSON.stringify(Object.fromEntries(all.slice(-PICKED_MAX))));
+    } catch {
+      /* not kept */
+    }
+  }, 2000);
+}
+/** Which of a picture's candidates loads, as far as it's known (this session, or before). */
+const pickedFor = (srcs: string[]) => {
+  const i = picked.get(srcs.join("|")) ?? pickedBefore[srcs[0]];
+  return i !== undefined && i <= srcs.length ? i : undefined; // (srcs.length: none loads)
+};
+const pending = new Set<string>();
+const held: HTMLImageElement[] = [];
+const HELD = 80;
+
+/** Fetches and decodes the first of a picture's candidates that loads, ahead of its being shown. */
+export function preloadImage(srcs: string[] | undefined) {
+  if (!srcs?.length) return;
+  const key = srcs.join("|");
+  if (pickedFor(srcs) !== undefined || pending.has(key)) return;
+  pending.add(key);
+  const next = (i: number) => {
+    if (i >= srcs.length) {
+      pending.delete(key);
+      pick(srcs, i);
+      return;
+    }
+    const img = new Image();
+    img.src = srcs[i];
+    img.decode().then(
+      () => {
+        pending.delete(key);
+        pick(srcs, i);
+        held.push(img);
+        if (held.length > HELD) held.shift();
+      },
+      () => next(i + 1),
+    );
+  };
+  next(0);
+}
+
 /** <img> that walks through candidate URLs until one loads. */
 export function FallbackImg({ srcs, style, fallback, onLoad }: { srcs: string[]; style?: CSSProperties; fallback?: any; onLoad?: () => void }) {
-  const [i, setI] = useState(0);
   const key = srcs.join("|");
-  useEffect(() => setI(0), [key]);
+  const [i, setI] = useState(() => pickedFor(srcs) ?? 0);
+  useEffect(() => setI(pickedFor(srcs) ?? 0), [key]);
   if (i >= srcs.length) return fallback ?? null;
-  return <img src={srcs[i]} style={style} onError={() => setI(i + 1)} onLoad={onLoad} draggable={false} />;
+  return (
+    <img
+      src={srcs[i]}
+      style={style}
+      onError={() => setI(i + 1)}
+      onLoad={() => {
+        pick(srcs, i);
+        onLoad?.();
+      }}
+      draggable={false}
+    />
+  );
 }
 
 export function useStageScale(ref: { current: HTMLDivElement | null }) {
@@ -125,7 +205,7 @@ export const BASE_CSS = `
 .xmb-enter { animation: xmbFade 220ms ease-out; }
 `;
 
-const MARQUEE_PX_PER_S = 30; // how fast it scrolls
+const MARQUEE_PX_PER_S = 60; // how fast it scrolls
 const MARQUEE_MIN_S = 1.2; // (a short way, no quicker than this)
 const MARQUEE_START_S = 0.15; // before it first moves
 const MARQUEE_HOLD_S = 2; // held at either end
@@ -195,7 +275,7 @@ export function Marquee({ text, on, className, style }: { text: string; on: bool
   );
 }
 
-/** A button's symbol in a hint ("○ Back"), from the chosen Controller Symbols (DualShock 3 by default). */
+/** A button's symbol in a hint ("○ Back"), from the chosen Controller Symbols (DualShock 2 by default). */
 export function Glyph({ b, size = 24 }: { b: GlyphButton; size?: number }) {
   useSettings();
   return <img src={glyphSrc(b)} draggable={false} style={{ width: size, height: size, objectFit: "contain", verticalAlign: "middle", flex: "none" }} />;

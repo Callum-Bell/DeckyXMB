@@ -3,12 +3,15 @@ import { ThemeKey, useSettings } from "../settings";
 import { DynamicBackground } from "../dynamic/DynamicBackground";
 import { activeTheme, Assets, sceneDrawn, stagedTheme, useThemes } from "../themes";
 import { brightnessOf, rgb, themeColor } from "./theme";
+import { LAUNCH_BLACK_MS, LAUNCH_SPARKS_MS } from "../launch";
 
 /**
  * The background of every XMB screen: the wave in the user's theme colour, or an installed theme's.
  * `dim` darkens it (the trophy page); `theme` and `brightness` override the saved ones (live preview while picking);
  * `blur` softens it, as behind the PS3's Trophy Collection (an animated theme drawn at a low resolution meanwhile: the
- * blur hides it, and there's far less to draw).
+ * blur hides it, and there's far less to draw). `dark` (when, by Date.now(): the page's own clocks differ from the plugin's) is a game starting (launch.ts): it
+ * goes black but for the wave's sparkles, which fade out after (with a theme on too: its background goes, and the wave's
+ * sparkles come up over the black).
  */
 export function ThemedWave({
   now,
@@ -17,6 +20,7 @@ export function ThemedWave({
   blur = false,
   theme,
   brightness,
+  dark,
 }: {
   now: Date;
   dim?: number;
@@ -24,6 +28,7 @@ export function ThemedWave({
   blur?: boolean;
   theme?: ThemeKey;
   brightness?: string;
+  dark?: number;
 }) {
   const [s] = useSettings();
   useThemes();
@@ -40,11 +45,12 @@ export function ThemedWave({
     return () => clearTimeout(t);
   }, [hidden]);
   const layer = (t: Assets | null, shown: boolean) => {
-    const off = hidden || !shown;
+    const off = hidden || !shown || (!!dark && !!t); // (a theme's background just goes black; the wave's sparkles stay a moment)
     const still = (hidden && stopped) || !shown; // (no longer seen)
     // Deep Blacks: video levels (16 → black, 235 → white: (v − 16) × 255 / 219), as two filters the GPU applies.
     const filter = t && s.deepBlacks === "on" ? DEEP_BLACKS : undefined;
-    const style = { position: "absolute", inset: 0, opacity: off ? 0 : 1, transition: shown ? `opacity ${FADE_MS}ms ease-out` : "none", filter } as const;
+    const fade = dark ? `opacity ${LAUNCH_BLACK_MS}ms ease-in` : `opacity ${FADE_MS}ms ease-out`;
+    const style = { position: "absolute", inset: 0, opacity: off ? 0 : 1, transition: shown ? fade : "none", filter } as const;
     if (t?.scene) {
       return (
         <div key={t.key} style={style}>
@@ -72,12 +78,19 @@ export function ThemedWave({
     return (
       <div key="wave" style={style}>
         {/* Hidden (e.g. under game art): stop animating once it has faded out. */}
-        <Wave color={themeColor(theme ?? s.theme, now)} light={dim} animate={s.wave && !still} />
+        <Wave color={themeColor(theme ?? s.theme, now)} light={dim} animate={s.wave && !still} dark={dark} />
       </div>
     );
   };
   // One keyed list, so the incoming scene keeps its instance (and what it's drawn) when it's shown.
   const layers = [layer(active, true)];
+  if (dark && active) {
+    layers.push(
+      <div key="sparks" style={{ position: "absolute", inset: 0 }}>
+        <Wave color={themeColor(theme ?? s.theme, now)} light={dim} animate dark={dark} bare />
+      </div>,
+    );
+  }
   if (incoming?.scene && incoming.key !== active?.key) layers.unshift(layer(incoming, false));
   // Brightness (or the one being chosen): a veil of black over the background, fading between steps.
   const veil = 1 - brightnessOf(brightness ?? s.brightness);
@@ -209,10 +222,11 @@ function tracePath(ctx: CanvasRenderingContext2D, ys: Float32Array, W: number, s
  * ~30 fps; nothing is drawn while it isn't displayed (Steam can keep the home mounted
  * behind other pages).
  */
-export function Wave({ color, light, animate }: { color: RGB; light: number; animate: boolean }) {
+/** The wave. `bare`: only its sparkles, for a game starting (`dark`) over a theme's background (nothing else drawn). */
+export function Wave({ color, light, animate, dark, bare = false }: { color: RGB; light: number; animate: boolean; dark?: number; bare?: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const props = useRef({ color, light, animate });
-  props.current = { color, light, animate };
+  const props = useRef({ color, light, animate, dark });
+  props.current = { color, light, animate, dark };
 
   useEffect(() => {
     const canvas = canvasRef.current!;
@@ -288,10 +302,11 @@ export function Wave({ color, light, animate }: { color: RGB; light: number; ani
     const resize = () => {
       canvas.width = Math.max(1, canvas.offsetWidth);
       canvas.height = Math.max(1, canvas.offsetHeight);
-      bloom.width = Math.max(1, Math.round(canvas.width / 4));
-      bloom.height = Math.max(1, Math.round(canvas.height / 4));
-      back.width = canvas.width;
-      back.height = canvas.height;
+      // (bare: no wave or background drawn, so no room kept for them)
+      bloom.width = bare ? 1 : Math.max(1, Math.round(canvas.width / 4));
+      bloom.height = bare ? 1 : Math.max(1, Math.round(canvas.height / 4));
+      back.width = bare ? 1 : canvas.width;
+      back.height = bare ? 1 : canvas.height;
       backKey = "";
     };
     resize();
@@ -300,7 +315,8 @@ export function Wave({ color, light, animate }: { color: RGB; light: number; ani
 
     const draw = (now: number) => {
       raf = win.requestAnimationFrame(draw);
-      const { color: want, light: l, animate: anim } = props.current;
+      const { color: want, light: l, dark } = props.current;
+      const anim = props.current.animate || !!dark; // (the sparkles drift on as it goes black, even on a still wave)
       // ~30 fps is plenty: on a schedule, so a display frame landing a hair early doesn't drop it to 20.
       if (now < due - 3) return;
       due = Math.max(due + 1000 / 30, now);
@@ -321,7 +337,7 @@ export function Wave({ color, light, animate }: { color: RGB; light: number; ani
       // ~78% overall, a deep shade pooling in a tall band down the left edge, a slightly darker
       // middle band, and a soft greyish haze low down.
       const bk = `${c.join()}|${l}|${W}x${H}`;
-      if (bk !== backKey) {
+      if (!bare && bk !== backKey) {
         backKey = bk;
         const deep = c.map((v) => (v * 0.55 + (v * v) / 255) / 2) as RGB;
         const haze = c.map((v) => v * 0.85 + (128 - v * 0.85) * 0.25) as RGB;
@@ -349,11 +365,12 @@ export function Wave({ color, light, animate }: { color: RGB; light: number; ani
         backCtx.fillStyle = low;
         backCtx.fillRect(0, 0, W, H);
       }
-      ctx.globalCompositeOperation = "source-over";
-      ctx.drawImage(back, 0, 0);
-
-      // The wave
-      const edges = SHEETS.map((s) => sheetEdges(s, t, H));
+      // A game starting (launch.ts), as the PS3 does: everything goes black but the sparkles, fewer and in clumps, some
+      // bright and most faint, with soft out-of-focus discs among them; they drift on, rise a little towards the middle,
+      // spread out towards you, growing, and fade.
+      const since = dark ? Date.now() - dark : -1;
+      const black = since < 0 ? 0 : Math.min(1, since / LAUNCH_BLACK_MS);
+      const gone = since < 0 ? 0 : Math.min(1, since / LAUNCH_SPARKS_MS);
       // Bright light in a lighter tint of the theme colour (the PS3's wave isn't pure white).
       const tint = c.map((v) => Math.round(v + (255 - v) * 0.75)) as RGB;
       const tintStr = (a: number) => `rgba(${tint[0]},${tint[1]},${tint[2]},${a})`;
@@ -364,92 +381,134 @@ export function Wave({ color, light, animate }: { color: RGB; light: number; ani
       if (tintDot.key !== tintKey) tintDot = { key: tintKey, sprite: dotSprite(tintKey) };
       const px = H / 1080;
 
-      // Bloom: the sheets and their edges drawn soft and wide at quarter size, then scaled up.
-      bctx.clearRect(0, 0, bloom.width, bloom.height);
-      bctx.globalCompositeOperation = "lighter";
-      const bs = bloom.width / W;
-      edges.forEach(({ top, bot }, i) => {
-        bctx.fillStyle = tintStr(SHEETS[i].fill * 2.2);
-        bctx.beginPath();
-        for (let k = 0; k <= STEPS; k++) bctx.lineTo((k / STEPS) * bloom.width, top[k] * bs);
-        for (let k = STEPS; k >= 0; k--) bctx.lineTo((k / STEPS) * bloom.width, bot[k] * bs);
-        bctx.closePath();
-        bctx.fill();
-        bctx.strokeStyle = tintStr(0.18);
-        bctx.lineWidth = 3.5;
-        tracePath(bctx, top, W, bs, bs);
-        bctx.stroke();
-        tracePath(bctx, bot, W, bs, bs);
-        bctx.stroke();
-      });
-      ctx.globalCompositeOperation = "lighter";
-      ctx.imageSmoothingEnabled = true;
-      ctx.globalAlpha = 0.32;
-      ctx.drawImage(bloom, 0, 0, W, H);
-      ctx.globalAlpha = 1;
+      // (all black once a game's starting: only the sparkles are left to draw)
+      if (bare) {
+        ctx.globalCompositeOperation = "source-over";
+        ctx.clearRect(0, 0, W, H);
+        ctx.globalCompositeOperation = "lighter";
+      } else if (black < 1) {
+        ctx.globalCompositeOperation = "source-over";
+        ctx.drawImage(back, 0, 0);
 
-      // The sheets, shaded as if lit from above (the PS3's 3D look): a translucent body, a
-      // brighter upper surface just under the crest, a lit crest edge and a faint underside.
-      const fillBetween = (a: Float32Array, b: Float32Array) => {
-        ctx.beginPath();
-        for (let k = 0; k <= STEPS; k++) ctx.lineTo((k / STEPS) * W, a[k]);
-        for (let k = STEPS; k >= 0; k--) ctx.lineTo((k / STEPS) * W, b[k]);
-        ctx.closePath();
-        ctx.fill();
-      };
-      edges.forEach(({ top, bot }, i) => {
-        const s = SHEETS[i];
-        ctx.fillStyle = tintStr(s.fill * 0.8);
-        fillBetween(top, bot);
-        const upper = top.map((y, k) => y + (bot[k] - y) * 0.35);
-        ctx.fillStyle = tintStr(s.fill * 1.3);
-        fillBetween(top, upper);
-        // Edges: the crest gets a glow and a bright line; the underside just a faint line.
-        // Where a sheet pinches its edges overlap, so its folds glow brightest.
-        for (const [ys, width, alpha] of [
-          [top, 8, 0.02],
-          [top, 1.4, 0.12],
-          [bot, 6, 0.01],
-          [bot, 1, 0.035],
-        ] as const) {
-          ctx.strokeStyle = tintStr(alpha);
-          ctx.lineWidth = width;
-          tracePath(ctx, ys, W);
-          ctx.stroke();
+        // The wave
+        const edges = SHEETS.map((s) => sheetEdges(s, t, H));
+
+        // Bloom: the sheets and their edges drawn soft and wide at quarter size, then scaled up.
+        bctx.clearRect(0, 0, bloom.width, bloom.height);
+        bctx.globalCompositeOperation = "lighter";
+        const bs = bloom.width / W;
+        edges.forEach(({ top, bot }, i) => {
+          bctx.fillStyle = tintStr(SHEETS[i].fill * 2.2);
+          bctx.beginPath();
+          for (let k = 0; k <= STEPS; k++) bctx.lineTo((k / STEPS) * bloom.width, top[k] * bs);
+          for (let k = STEPS; k >= 0; k--) bctx.lineTo((k / STEPS) * bloom.width, bot[k] * bs);
+          bctx.closePath();
+          bctx.fill();
+          bctx.strokeStyle = tintStr(0.18);
+          bctx.lineWidth = 3.5;
+          tracePath(bctx, top, W, bs, bs);
+          bctx.stroke();
+          tracePath(bctx, bot, W, bs, bs);
+          bctx.stroke();
+        });
+        ctx.globalCompositeOperation = "lighter";
+        ctx.imageSmoothingEnabled = true;
+        ctx.globalAlpha = 0.32;
+        ctx.drawImage(bloom, 0, 0, W, H);
+        ctx.globalAlpha = 1;
+
+        // The sheets, shaded as if lit from above (the PS3's 3D look): a translucent body, a
+        // brighter upper surface just under the crest, a lit crest edge and a faint underside.
+        const fillBetween = (a: Float32Array, b: Float32Array) => {
+          ctx.beginPath();
+          for (let k = 0; k <= STEPS; k++) ctx.lineTo((k / STEPS) * W, a[k]);
+          for (let k = STEPS; k >= 0; k--) ctx.lineTo((k / STEPS) * W, b[k]);
+          ctx.closePath();
+          ctx.fill();
+        };
+        edges.forEach(({ top, bot }, i) => {
+          const s = SHEETS[i];
+          ctx.fillStyle = tintStr(s.fill * 0.8);
+          fillBetween(top, bot);
+          const upper = top.map((y, k) => y + (bot[k] - y) * 0.35);
+          ctx.fillStyle = tintStr(s.fill * 1.3);
+          fillBetween(top, upper);
+          // Edges: the crest gets a glow and a bright line; the underside just a faint line.
+          // Where a sheet pinches its edges overlap, so its folds glow brightest.
+          for (const [ys, width, alpha] of [
+            [top, 8, 0.02],
+            [top, 1.4, 0.12],
+            [bot, 6, 0.01],
+            [bot, 1, 0.035],
+          ] as const) {
+            ctx.strokeStyle = tintStr(alpha);
+            ctx.lineWidth = width;
+            tracePath(ctx, ys, W);
+            ctx.stroke();
+          }
+        });
+
+        // The lens dots at the wave's entry: soft discs, strongest at the left edge and fading
+        // as they drift right, wandering a little and flashing.
+        for (const d of lens) {
+          // Distance in from its screen edge; the right-hand ones drift out past the right edge.
+          const run = (d.x + t * d.speed) % (ENTRY + LEAD);
+          const edge = (d.end ? ENTRY - run : run - LEAD) + 0.006 * Math.sin(t * d.wx + d.p);
+          const xf = d.end ? 1 - edge : edge;
+          const fade = Math.pow(Math.max(0, 1 - Math.max(0, edge) / ENTRY), 1.1); // strongest at the edge
+          const flash = Math.pow(0.5 + 0.5 * Math.sin(t * d.fr + d.q), 2);
+          const a = d.a * (d.end ? 0.7 : 1) * fade * (0.25 + 0.75 * flash);
+          if (a <= 0.01) continue;
+          const x = xf * W;
+          const sx = Math.min(1, Math.max(0, xf));
+          const y = (spine(sx, t) + d.off * (d.end ? fan(sx) * 1.5 : 1) + 0.02 * Math.sin(t * d.wy + d.q)) * H;
+          const r = d.r * H;
+          ctx.globalAlpha = a;
+          ctx.drawImage(d.lav ? lavDot : tintDot.sprite, x - r, y - r, r * 2, r * 2);
         }
-      });
-
-      // The lens dots at the wave's entry: soft discs, strongest at the left edge and fading
-      // as they drift right, wandering a little and flashing.
-      for (const d of lens) {
-        // Distance in from its screen edge; the right-hand ones drift out past the right edge.
-        const run = (d.x + t * d.speed) % (ENTRY + LEAD);
-        const edge = (d.end ? ENTRY - run : run - LEAD) + 0.006 * Math.sin(t * d.wx + d.p);
-        const xf = d.end ? 1 - edge : edge;
-        const fade = Math.pow(Math.max(0, 1 - Math.max(0, edge) / ENTRY), 1.1); // strongest at the edge
-        const flash = Math.pow(0.5 + 0.5 * Math.sin(t * d.fr + d.q), 2);
-        const a = d.a * (d.end ? 0.7 : 1) * fade * (0.25 + 0.75 * flash);
-        if (a <= 0.01) continue;
-        const x = xf * W;
-        const sx = Math.min(1, Math.max(0, xf));
-        const y = (spine(sx, t) + d.off * (d.end ? fan(sx) * 1.5 : 1) + 0.02 * Math.sin(t * d.wy + d.q)) * H;
-        const r = d.r * H;
-        ctx.globalAlpha = a;
-        ctx.drawImage(d.lav ? lavDot : tintDot.sprite, x - r, y - r, r * 2, r * 2);
+        ctx.globalAlpha = 1;
       }
-      ctx.globalAlpha = 1;
+
+      if (black > 0 && !bare) {
+        ctx.globalCompositeOperation = "source-over";
+        ctx.fillStyle = `rgba(0,0,0,${black})`;
+        ctx.fillRect(0, 0, W, H);
+        ctx.globalCompositeOperation = "lighter";
+      }
+      // (they gather to the middle of the screen as it goes black, then come out from there towards you)
+      const rise = (0.56 - SPINE.base) * H * (1 - (1 - black) ** 2);
+      const zoom = 1 + 0.35 * gone;
+      const left = gone < 0.4 ? 1 : (1 - (gone - 0.4) / 0.6) ** 1.3; // (they stay a while, then fade)
 
       // Sparkles, tinted like the wave: each blinks on and off (mostly dim, briefly bright),
       // flowing with the sheet, a little denser where the wave comes in from the left.
       // Drawn in batches of equal brightness (SPARK_LEVELS steps): one fill per batch, not per sparkle.
       const batches: number[][] = Array.from({ length: SPARK_LEVELS + 1 }, () => []);
+      const discs: number[] = [];
       for (const s of sparks) {
         const xf = (s.x + t * s.speed) % 1;
         const blink = Math.pow(0.5 + 0.5 * Math.sin(t * s.tw + s.p), 8);
-        const a = (0.14 + 0.86 * blink) * Math.min(1, xf / 0.03) * (1 - 0.45 * xf);
+        const k = s.p / TAU; // (its own fixed 0–1)
+        let a = (0.14 + 0.86 * blink) * Math.min(1, xf / 0.03) * (1 - 0.45 * xf);
+        if (black > 0) {
+          // On the black: some go, the rest in clumps along the wave, brighter.
+          const clump = 0.5 + 0.5 * Math.sin(xf * 19 + 2.1) * Math.sin(xf * 7.3 + 0.4);
+          a *= (k < 1 - 0.25 * black ? 1 : 0) * (1 - black + black * (0.4 + 0.6 * clump)) * (1 + 2.2 * black);
+        }
+        a = Math.min(1, a * left * (bare ? black : 1)); // (bare: coming up as the theme's background goes)
+        const x = W / 2 + (xf * W - W / 2) * zoom;
+        const y = H / 2 + ((spine(xf, t) + s.off * fan(xf) * (1 + 0.8 * gone)) * H + rise - H / 2) * zoom;
+        if (black > 0 && k < 0.025) discs.push(x, y, (3 + 6 * s.size) * px * (1 + 0.8 * gone), 0.16 * black * left * (0.6 + 0.4 * Math.sin(t * 1.5 + s.tw)));
         if (a <= 0.02) continue;
-        batches[Math.round(a * SPARK_LEVELS)].push(xf * W, (spine(xf, t) + s.off * fan(xf)) * H, s.size * px * (1 + 0.2 * blink));
+        batches[Math.round(a * SPARK_LEVELS)].push(x, y, s.size * px * (1 + 0.2 * blink) * (1 + 0.4 * black + 1.2 * gone));
       }
+      // (the soft discs: the lens dots' sprite)
+      for (let i = 0; i < discs.length; i += 4) {
+        ctx.globalAlpha = Math.max(0, discs[i + 3]);
+        const r = discs[i + 2];
+        ctx.drawImage(i % 8 ? tintDot.sprite : lavDot, discs[i] - r, discs[i + 1] - r, r * 2, r * 2);
+      }
+      ctx.globalAlpha = 1;
       batches.forEach((b, level) => {
         if (!b.length) return;
         ctx.fillStyle = sparkStr(level / SPARK_LEVELS);

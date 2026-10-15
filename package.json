@@ -1,6 +1,6 @@
 {
   "name": "deckyxmb",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "PS3-style XrossMediaBar home screen for Steam Deck (Decky Loader plugin)",
   "author": "InsaneCallum",
   "type": "module",
@@ -10,7 +10,8 @@
     "preview": "node build/build.mjs --preview && node build/serve.mjs",
     "package": "node build/build.mjs && node build/package.mjs",
     "typecheck": "tsc -p tsconfig.json",
-    "record": "node build/record.mjs"
+    "record": "node build/record.mjs",
+    "screenshot": "node build/screenshot.mjs"
   },
   "license": "BSD-3-Clause",
   "devDependencies": {

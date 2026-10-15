@@ -3,6 +3,7 @@ import base64
 import json
 import os
 import shutil
+import tempfile
 
 import decky
 import edat  # py_modules/edat.py: unlocks licence-locked themes with their .rap
@@ -10,6 +11,7 @@ import p3t  # py_modules/p3t.py: reads PS3 theme files
 import pkg  # py_modules/pkg.py: reads the theme out of a PS3 package
 import retro  # py_modules/retro.py: RetroAchievements, for games Emuchievements can't match
 import soundtracks  # py_modules/soundtracks.py: Steam soundtracks
+import steamhunters  # py_modules/steamhunters.py: which achievements came with which DLC
 
 
 def _settings_path() -> str:
@@ -22,6 +24,44 @@ def _themes_dir() -> str:
 
 def _theme_dir(tid: str) -> str:
     return os.path.join(_themes_dir(), os.path.basename(tid))
+
+
+def _cache_dir(kind: str) -> str:
+    """Where one kind of saved data is kept (trophy lists, DLC groups...), a file for each entry."""
+    return os.path.join(decky.DECKY_PLUGIN_RUNTIME_DIR, "cache", "".join(c for c in str(kind) if c.isalnum()))
+
+
+def _cache_file(kind: str, key) -> str:
+    return os.path.join(_cache_dir(kind), "".join(c for c in str(key) if c.isalnum() or c in "-_") + ".json")
+
+
+def _cache_get(kind: str, key):
+    try:
+        with open(_cache_file(kind, key), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        decky.logger.warning(f"cache {kind}/{key} unreadable: {e}")
+        return None
+
+
+def _cache_put(kind: str, key, value) -> bool:
+    path = _cache_file(kind, key)
+    tmp = None
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        # (a temporary file of its own: the same entry can be saved twice at once, a game's list read by two pages)
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(value, f, ensure_ascii=False, separators=(",", ":"))
+        os.replace(tmp, path)
+        return True
+    except Exception as e:
+        decky.logger.error(f"cache {kind}/{key} not written: {e}")
+        if tmp and os.path.exists(tmp):
+            os.remove(tmp)
+        return False
 
 
 def _theme_meta(dest: str) -> dict:
@@ -162,6 +202,7 @@ def _theme_entry(tid: str):
     except Exception:
         return None
     meta.pop("icons", None)
+    meta.pop("sounds", None)
     meta["path"] = dest  # where its files are (shown in Information)
     # (themes installed by earlier versions have it as preview.png)
     thumb = next((p for p in (os.path.join(dest, n) for n in ("thumb.png", "preview.png")) if os.path.exists(p)), None)
@@ -221,10 +262,21 @@ def _get_theme(tid: str):
             icons[iid] = _data_uri(os.path.join(dest, "icons", iid + ".png"), "image/png")
         except OSError:
             pass
+    sounds = {}
+    for sid in meta.get("sounds", []):
+        try:
+            sounds[sid] = _data_uri(os.path.join(dest, "sounds", os.path.basename(sid) + ".wav"), "audio/wav")
+        except OSError:
+            pass
     bg = _background(meta)
     path = os.path.join(dest, bg) if bg else ""
     mime = "image/png" if path.endswith(".png") else "image/jpeg"
-    return {**meta, "iconData": icons, "backgroundData": _data_uri(path, mime) if path and os.path.exists(path) else None}
+    return {
+        **meta,
+        "iconData": icons,
+        "soundData": sounds,
+        "backgroundData": _data_uri(path, mime) if path and os.path.exists(path) else None,
+    }
 
 
 def _get_theme_preview(tid: str):
@@ -389,6 +441,22 @@ class Plugin:
             decky.logger.error(f"RetroAchievements game {game_id} failed: {e}")
             return None
 
+    # Saved data (trophy lists, DLC groups, RetroAchievements' games): kept across restarts, shown at once, read again behind
+
+    async def cache_get(self, kind: str, key):
+        """One saved entry (None: there isn't one)."""
+        return await asyncio.to_thread(_cache_get, kind, key)
+
+    async def cache_put(self, kind: str, key, value) -> bool:
+        """Saves one entry."""
+        return await asyncio.to_thread(_cache_put, kind, key, value)
+
+    # Steam Hunters
+
+    async def trophy_groups(self, appid: int):
+        """A Steam game's achievements grouped by the DLC (or update) they came with ([]: none; None: couldn't be asked)."""
+        return await asyncio.to_thread(steamhunters.groups, appid)
+
     async def _main(self):
         pass
 
@@ -396,6 +464,7 @@ class Plugin:
         pass
 
     async def _uninstall(self):
+        shutil.rmtree(os.path.join(decky.DECKY_PLUGIN_RUNTIME_DIR, "cache"), ignore_errors=True)
         for p in (_settings_path(), _settings_path() + ".tmp"):
             try:
                 os.remove(p)

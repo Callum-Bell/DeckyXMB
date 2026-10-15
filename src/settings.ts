@@ -9,9 +9,10 @@ export interface Settings {
   theme: ThemeKey;
   wave: boolean;
   backgrounds: boolean; // fade in the selected game's art
+  gameArt: "capsule" | "logo"; // a game drawn as its capsule art, or as its logo (Theme Settings > Game Icons)
   clock: boolean;
   sounds: boolean;
-  gameAction: "menu" | "launch" | "page"; // what ✕ does on a game
+  gameConfirm: "launch" | "menu" | "page"; // what ✕ does on a game (△ opens its options); renamed from gameAction, so the new default applies
   installedOnly: boolean; // Game column shows installed games only
   // Folders in the Game column besides All Games (△ there to choose): Favorites, installed games, Steam's other collections
   gameFavorites: boolean;
@@ -19,7 +20,10 @@ export interface Settings {
   gameCollections: boolean;
   videoGames: number[]; // games moved to the Video column (their app ids), out of the Game column
   trophyCollection: "xmb" | "page"; // how a game's trophies were last shown (△ switches): listed in the XMB (as the PS3), or the trophy page
-  trophySort: "original" | "name" | "newest" | "oldest" | "grade"; // a game's trophies, in the XMB (△ > Sort By) and on the trophy page (□): as the game lists them, by name, by when earned, or rarest first
+  trophyGroups: boolean; // Group Content (△ on a game's trophies): its trophies by the DLC they came with (Steam Hunters' groups)
+  trophyHidden: number[]; // games hidden from Trophy Collection (△ on one: Hide Game), besides those found to have no achievements
+  trophyShowHidden: boolean; // Trophy Collection lists its hidden games too (△ on a game: Show Hidden Games)
+  trophySort: "original" | "name" | "newest" | "oldest" | "unearned" | "grade"; // a game's trophies, in the XMB (△ > Sort By) and on the trophy page (□): as the game lists them, by name, by when earned (or those not yet earned first, then the latest earned), or rarest first
   music: boolean; // play the game's ThemeDeck track while it's selected
   dateFormat: DateFormat;
   timeFormat: TimeFormat;
@@ -36,15 +40,19 @@ export const DEFAULTS: Settings = {
   theme: "monthly",
   wave: true,
   backgrounds: true,
+  gameArt: "capsule",
   clock: true,
   sounds: true,
-  gameAction: "menu",
+  gameConfirm: "launch",
   installedOnly: true,
   gameFavorites: false,
   gameInstalled: false,
   gameCollections: false,
   videoGames: [],
   trophyCollection: "xmb",
+  trophyGroups: true,
+  trophyHidden: [],
+  trophyShowHidden: false,
   trophySort: "original",
   music: true,
   dateFormat: "DMY",
@@ -53,7 +61,7 @@ export const DEFAULTS: Settings = {
   brightness: "0",
   deepBlacks: "off",
   themeResolution: "native",
-  controllerGlyphs: "ds3",
+  controllerGlyphs: "ds2",
   profileColour: "",
 };
 

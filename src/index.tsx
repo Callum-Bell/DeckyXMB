@@ -6,6 +6,7 @@ import { musicStop } from "./music";
 import { SafeBoundary } from "./safety";
 import { initSettings, updateSettings, useSettings } from "./settings";
 import { startControllerGlyphs } from "./glyphs";
+import { patchSteamSounds } from "./sound";
 import { openWeb } from "./system";
 import { initThemes } from "./themes";
 import { Icon } from "./xmb/icons";
@@ -45,12 +46,12 @@ function QuickAccessPanel() {
               </>
             }
             rgOptions={[
-              { data: "menu", label: "Show options (Play, Achievements…)" },
               { data: "launch", label: "Play straight away" },
+              { data: "menu", label: "Show options (Play, Trophies…)" },
               { data: "page", label: "Open game page" },
             ]}
-            selectedOption={s.gameAction}
-            onChange={(o: any) => updateSettings({ gameAction: o.data })}
+            selectedOption={s.gameConfirm}
+            onChange={(o: any) => updateSettings({ gameConfirm: o.data })}
           />
         </PanelSectionRow>
         <PanelSectionRow>
@@ -73,7 +74,12 @@ function QuickAccessPanel() {
           <ToggleField label="Clock" checked={s.clock} onChange={(v: boolean) => updateSettings({ clock: v })} />
         </PanelSectionRow>
         <PanelSectionRow>
-          <ToggleField label="Sounds" checked={s.sounds} onChange={(v: boolean) => updateSettings({ sounds: v })} />
+          <ToggleField
+            label="Sounds"
+            description="The PS3's sound effects (or a theme's), in place of Steam's. Off: Steam's own."
+            checked={s.sounds}
+            onChange={(v: boolean) => updateSettings({ sounds: v })}
+          />
         </PanelSectionRow>
       </PanelSection>
       <PanelSection title="Music">
@@ -119,6 +125,7 @@ export default definePlugin(() => {
   initSettings();
   initThemes();
   const stopGlyphs = startControllerGlyphs();
+  const unpatchSounds = patchSteamSounds();
   routerHook.addRoute(TROPHY_ROUTE, TrophyRoute, { exact: true });
   const homePatch = routerHook.addPatch(HOME_ROUTE, (props: any) => {
     const original = props.children;
@@ -137,6 +144,7 @@ export default definePlugin(() => {
     onDismount() {
       musicStop();
       stopGlyphs();
+      unpatchSounds();
       routerHook.removeRoute(TROPHY_ROUTE);
       routerHook.removePatch(HOME_ROUTE, homePatch);
     },

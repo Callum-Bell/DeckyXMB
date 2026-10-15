@@ -1,15 +1,17 @@
 // Reads the library from Steam's internal stores (not a public API field
 // names can shift between client updates, so everything degrades to empty).
 // Store access patterns from Spindeck (BSD-3-Clause).
+import { call } from "@decky/api";
 import { Navigation } from "@decky/ui";
 import { formatDate } from "./datetime";
 import { musicStop } from "./music";
 import { stopSoundtrack } from "./soundtracks";
-import { Settings, updateSettings } from "./settings";
+import { getSettings, Settings, updateSettings } from "./settings";
+import { save, saved } from "./saved";
 import { useEffect } from "react";
 import { refreshRetro, retroProgress, retroTrophies } from "./retro";
 import { signal } from "./signal";
-import { sleep } from "./async";
+import { sleep, timeout } from "./async";
 import { findExport, lookup } from "./webpack";
 
 declare const collectionStore: any;
@@ -25,6 +27,7 @@ export interface Game {
   minutes: number;
   installed: boolean;
   icon: string[]; // landscape art candidates (PS3 ICON0 is landscape too)
+  logo: string[]; // its logo's candidates, then its landscape art's (if it has no logo)
   background: string[]; // hero art candidates (PS3 PIC1)
   cover?: string[]; // a soundtrack's square album cover candidates
   overview: any;
@@ -55,10 +58,12 @@ function toGame(a: any): Game {
   const shortcut = a.app_type === APP_TYPE_SHORTCUT;
   const icon = [...custom("GetCustomLandcapeImageURLs", a), ...custom("GetCustomLandscapeImageURLs", a)];
   const background = custom("GetCustomHeroImageURLs", a);
+  const logo = custom("GetCustomLogoImageURLs", a);
   if (!shortcut) {
     // (Steam's own copies first, kept for its library: loaded in a moment, where its servers can take seconds)
     icon.push(`${LOCAL}/${a.appid}/header.jpg`, `${CDN}/${a.appid}/header.jpg`, `${CDN}/${a.appid}/capsule_616x353.jpg`);
     background.push(`${LOCAL}/${a.appid}/library_hero.jpg`, `${CDN}/${a.appid}/library_hero.jpg`);
+    logo.push(`${LOCAL}/${a.appid}/logo.png`, `${CDN}/${a.appid}/logo.png`);
   }
   return {
     appid: a.appid,
@@ -68,6 +73,7 @@ function toGame(a: any): Game {
     minutes: Number(a.minutes_playtime_forever ?? 0),
     installed: shortcut ? true : !!(a.installed ?? a.local_per_client_data?.installed),
     icon,
+    logo: [...logo, ...icon],
     background,
     overview: a,
   };
@@ -157,13 +163,16 @@ export function collections(): Collection[] {
   }, []);
 }
 
-export function launchGame(g: Game) {
+/** Starts a game; false if it couldn't be (its page is opened instead). */
+export function launchGame(g: Game): boolean {
   musicStop();
   stopSoundtrack();
   try {
     SteamClient.Apps.RunGame(g.gameid, "", -1, 100);
+    return true;
   } catch {
     openGamePage(g);
+    return false;
   }
 }
 
@@ -192,7 +201,7 @@ export const TROPHY_ROUTE = "/deckyxmb/trophies/:appid";
 let pendingTrophyApp: Game | null = null;
 
 let fromCollection = false;
-/** The trophy page; from Achievement Collection, △ on it lists its trophies in the XMB instead. */
+/** The trophy page; from Trophy Collection, △ on it lists its trophies in the XMB instead. */
 export function openAchievements(g: Game, collection = false) {
   pendingTrophyApp = g;
   fromCollection = collection;
@@ -200,7 +209,7 @@ export function openAchievements(g: Game, collection = false) {
 }
 
 // △ switches between the two ways of showing a game's trophies, remembered for next time: the trophy page, or its
-// trophies listed in the XMB (Network > Achievement Collection, that game opened, as the PS3 lists them).
+// trophies listed in the XMB (Network > Trophy Collection, that game opened, as the PS3 lists them).
 let listOnReturn = 0;
 export function showTrophyPage(g: Game) {
   updateSettings({ trophyCollection: "page" });
@@ -211,10 +220,10 @@ export function showTrophiesInXMB(appid: number) {
   requestTrophyList(appid);
   Navigation.NavigateBack();
 }
-/** Whether the trophy page was opened from Achievement Collection (△ goes back to it). */
+/** Whether the trophy page was opened from Trophy Collection (△ goes back to it). */
 export const trophyPageFromCollection = () => fromCollection;
 export const setTrophyPageFromCollection = (on: boolean) => void (fromCollection = on);
-/** The XMB, shown again, opens this game's trophies in Achievement Collection. */
+/** The XMB, shown again, opens this game's trophies in Trophy Collection. */
 export const requestTrophyList = (appid: number) => void (listOnReturn = appid);
 /** The game whose trophies the XMB should open as it's shown (once). */
 export function takeTrophyListRequest() {
@@ -266,7 +275,7 @@ const toTrophy = (a: any): Trophy => ({
 });
 
 /** How many of these are earned, of how many. */
-const countOf = (t: Trophy[]): AchievementProgress => ({ achieved: t.filter((x) => x.achieved).length, total: t.length });
+export const countOf = (t: Trophy[]): AchievementProgress => ({ achieved: t.filter((x) => x.achieved).length, total: t.length });
 
 /** The orders a game's trophies can be listed in (Sort By), shared by the XMB's list and the trophy page. */
 export const TROPHY_SORTS: [Settings["trophySort"], string][] = [
@@ -274,16 +283,21 @@ export const TROPHY_SORTS: [Settings["trophySort"], string][] = [
   ["name", "Title Name"],
   ["newest", "Earned Date ▼"],
   ["oldest", "Earned Date ▲"],
+  ["unearned", "Unearned First"],
   ["grade", "Grade"],
 ];
 
-/** In the order chosen: by date, the earned ones first (the unearned after them, as the game lists them); by grade, the rarest first. */
+/**
+ * In the order chosen: by date, the earned ones first (the unearned after them, as the game lists them); unearned first,
+ * those not yet earned (as the game lists them) then the earned, latest first; by grade, the rarest first.
+ */
 export function sortTrophies(list: Trophy[], by: Settings["trophySort"], label: (t: Trophy) => string = (t) => t.name): Trophy[] {
   if (by === "name") return [...list].sort((a, b) => label(a).localeCompare(label(b)));
   if (by === "grade") return [...list].sort((a, b) => a.rarity - b.rarity);
-  if (by === "newest" || by === "oldest") {
-    const dir = by === "newest" ? -1 : 1;
-    return [...list].sort((a, b) => Number(b.achieved) - Number(a.achieved) || (a.achieved ? dir * (a.unlocked - b.unlocked) : 0));
+  if (by === "newest" || by === "oldest" || by === "unearned") {
+    const dir = by === "oldest" ? 1 : -1;
+    const first = by === "unearned" ? -1 : 1; // (which come first: the earned, or those not yet)
+    return [...list].sort((a, b) => first * (Number(b.achieved) - Number(a.achieved)) || (a.achieved ? dir * (a.unlocked - b.unlocked) : 0));
   }
   return list;
 }
@@ -338,8 +352,17 @@ const SHORTCUTS = 0x80000000; // (non-Steam games' app ids are from here)
 export async function loadTrophies(appid: number): Promise<Trophy[]> {
   const t = await readTrophies(appid);
   // (the game's progress, from the list just read: its percentage matches it, without asking again)
-  if (t.length) setProgress(appid, countOf(t));
+  if (t.length) {
+    setProgress(appid, countOf(t));
+    // (and the list kept, to show at once next time, after a restart too)
+    void saved<Trophy[]>("trophies", appid).then((had) => JSON.stringify(had) !== JSON.stringify(t) && save("trophies", appid, t));
+  }
   return t;
+}
+
+/** A game's trophies as last read (this session, or kept from before), while they're read again. */
+export async function lastTrophies(appid: number): Promise<Trophy[] | undefined> {
+  return lists.get(appid) ?? saved<Trophy[]>("trophies", appid);
 }
 
 async function readTrophies(appid: number): Promise<Trophy[]> {
@@ -357,6 +380,73 @@ export interface AchievementProgress {
   total: number;
 }
 
+// Group Content: a game's trophies by the DLC (or free update) they came with, as Steam Hunters groups them (the
+// backend asks it: see py_modules/steamhunters.py), the base game's first. Steam games only; asked once a session.
+export interface TrophyGroup {
+  name: string;
+  appid: number | null; // whose art it has (the DLC's)
+  ids: string[]; // its trophies (their Steam API names)
+}
+
+export interface TrophySection {
+  key: string;
+  name: string;
+  art: string[];
+  trophies: Trophy[];
+}
+
+const groupsAsked = new Map<number, Promise<TrophyGroup[]>>();
+const groupsRead = new Map<number, TrophyGroup[]>();
+
+const GROUPS_KEEP_MS = 7 * 24 * 3600 * 1000; // (kept across restarts this long: a game's DLC rarely changes)
+
+/** A game's groups ([] if it has none, or they couldn't be read: asked again next session). */
+export function loadTrophyGroups(appid: number): Promise<TrophyGroup[]> {
+  if (appid >= SHORTCUTS) return Promise.resolve([]);
+  let p = groupsAsked.get(appid);
+  if (!p) {
+    p = saved<{ at: number; groups: TrophyGroup[] }>("groups", appid)
+      .then((kept) => {
+        if (kept && Date.now() - kept.at < GROUPS_KEEP_MS) return kept.groups;
+        return call<[number], TrophyGroup[] | null>("trophy_groups", appid)
+          .catch(() => null)
+          .then((g) => {
+            if (g) save("groups", appid, { at: Date.now(), groups: g });
+            return g;
+          });
+      })
+      .then((g) => {
+        if (!g) groupsAsked.delete(appid); // (a failure is asked again, the next time the list is opened)
+        groupsRead.set(appid, g ?? []);
+        return g ?? [];
+      });
+    groupsAsked.set(appid, p);
+  }
+  return p;
+}
+
+/**
+ * A game's trophies in its groups, when Group Content is on and it has any: its base game's (named as the game) and then
+ * each group's, in Steam Hunters' order, none of them empty. null: listed all together. (`always`: whether it has
+ * groups, Group Content on or off.)
+ */
+export function trophySections(g: Game, list: Trophy[], groups = groupsRead.get(g.appid), always = false): TrophySection[] | null {
+  if ((!always && !getSettings().trophyGroups) || !groups?.length || !list.length) return null;
+  // Each trophy in the first group that has it, else the base game's; each group in the game's order (Sort By sorts them).
+  const groupOf = new Map<string, number>();
+  groups.forEach((grp, i) => grp.ids.forEach((id) => groupOf.has(id) || groupOf.set(id, i)));
+  // (named as Steam Hunters names them; keyed by place, as a DLC can have more than one group: Frostpunk's On The Edge)
+  const out: TrophySection[] = groups.map((grp, i) => ({
+    key: String(i),
+    name: grp.name,
+    art: grp.appid ? [`${CDN}/${grp.appid}/header.jpg`, ...g.icon] : g.icon,
+    trophies: list.filter((t) => groupOf.get(t.id) === i),
+  }));
+  out.unshift({ key: "base", name: g.name, art: g.icon, trophies: list.filter((t) => !groupOf.has(t.id)) });
+  const shown = out.filter((s) => s.trophies.length);
+  return shown.length > 1 ? shown : null;
+}
+
 /** Counts from appDetailsStore, which Emuchievements patches for non-Steam games. */
 function storeCounts(appid: number): AchievementProgress | null {
   try {
@@ -367,7 +457,7 @@ function storeCounts(appid: number): AchievementProgress | null {
   }
 }
 
-// Achievement Collection: each game's progress, asked for as its row comes on screen (a few at a time, the newest
+// Trophy Collection: each game's progress, asked for as its row comes on screen (a few at a time, the newest
 // first: those passed by while scrolling wait), and, while the collection is open, any game not known yet behind them.
 // What's known is kept (across restarts too) and shown at once; each game on screen is asked again once each time the
 // collection is opened (in the background: a game's trophy list and back doesn't blank them while they're read again).
@@ -417,8 +507,8 @@ function steamProgress(appid: number): AchievementProgress | null | undefined {
  * A game's progress, asked for. `thorough` (Sync with Server) waits for Emuchievements even for a non-Steam game already
  * known to have none; otherwise that's only looked at again on RetroAchievements (not waited for: Plex, YouTube...).
  */
-async function fetchProgress(appid: number, thorough = false): Promise<AchievementProgress | null> {
-  if (steamProgress(appid) === null) return null; // (none: nothing to ask)
+async function fetchProgress(appid: number, thorough = false, recheck = false): Promise<AchievementProgress | null> {
+  if (!recheck && steamProgress(appid) === null) return null; // (none: nothing to ask)
   const known = storeCounts(appid);
   if (known) return known;
   // A non-Steam game: RetroAchievements' count, if it's there (Emuchievements' would be the same, if it could match it).
@@ -429,7 +519,7 @@ async function fetchProgress(appid: number, thorough = false): Promise<Achieveme
   const steam = await steamAchievements(appid);
   if (steam?.length) return countOf(steam);
   if (steam && appid < SHORTCUTS) return null; // (a Steam game Steam says has none; a non-Steam one may have Emuchievements')
-  if (!thorough && progress.get(appid) === null) return null;
+  if (!thorough && !recheck && progress.get(appid) === null) return null;
   const t = await storeTrophies(appid);
   return t.length ? countOf(t) : null;
 }
@@ -443,7 +533,27 @@ function setProgress(appid: number, p: AchievementProgress | null) {
   }
 }
 
+// While Trophy Collection is scrolling nothing new is asked: each answer re-renders the list, which (on the Deck) makes
+// the rows coming on jump into place rather than slide. Once it settles, the games either side of the selection first.
+const SETTLE_MS = 350;
+let settling = 0;
+let settled: ReturnType<typeof setTimeout> | undefined;
+
+/** Trophy Collection's selection moved: `near`, the games by it (the nearest first), are asked for once it settles. */
+export function achievementsScrolled(near: number[]) {
+  settling = Date.now() + SETTLE_MS;
+  for (const appid of [...near].reverse()) {
+    if (fresh.has(appid)) continue;
+    const i = wanted.indexOf(appid);
+    if (i >= 0) wanted.splice(i, 1);
+    wanted.push(appid); // (the nearest last: asked first)
+  }
+  clearTimeout(settled);
+  settled = setTimeout(askNext, SETTLE_MS);
+}
+
 function askNext() {
+  if (Date.now() < settling) return;
   while (asking < ASK_AT_ONCE && (wanted.length || unknown.length)) {
     const appid = wanted.length ? wanted.pop()! : unknown.shift()!;
     if (fresh.has(appid)) continue;
@@ -492,6 +602,23 @@ export async function recentTrophies(count: number, games = 8): Promise<Trophy[]
     .slice(0, count);
 }
 
+/**
+ * Whether Trophy Collection hides a game: hidden with △ (Hide Game), or known to have no achievements (it's not asked
+ * about again, the next time it's listed or synced, till it's unhidden).
+ */
+export const trophyGameHidden = (appid: number) => getSettings().trophyHidden.includes(appid) || knownOrSteam(appid) === null;
+
+/** △ on a game in Trophy Collection: hidden, or unhidden (and its achievements looked for again, Steam's word aside). */
+export function hideTrophyGame(appid: number, hide: boolean) {
+  const hidden = getSettings().trophyHidden.filter((a) => a !== appid);
+  updateSettings({ trophyHidden: hide ? [...hidden, appid] : hidden });
+  if (hide) return;
+  fresh.add(appid);
+  fetchProgress(appid, true, true)
+    .catch(() => null)
+    .then((p) => setProgress(appid, p));
+}
+
 /** What's known of a game's progress (not asking for it). */
 export const knownAchievementProgress = (appid: number) => progress.get(appid);
 
@@ -535,7 +662,7 @@ export function refreshAchievementProgress(appids: number[]): () => void {
   };
 }
 
-// Sync with Server (△ on Achievement Collection): every game's progress asked for again, more at once, as the
+// Sync with Server (△ on Trophy Collection): every game's progress asked for again, more at once, as the
 // PS3 synced its trophy information; what's read is kept as it comes (cancelling keeps what's been read so far).
 const SYNC_AT_ONCE = 6;
 let syncing: { done: number; total: number } | null = null;
@@ -548,11 +675,10 @@ export function useAchievementSync() {
   return syncing;
 }
 
-/** Steam games known to have no achievements (Steam says so, or they've been asked) are skipped. */
+/** Games Trophy Collection hides (no achievements, or hidden with △) are skipped: unhiding one looks again. */
 export function syncAchievements(appids: number[]) {
   const run = ++syncRun;
-  // (non-Steam games are asked again: RetroAchievements may have them now)
-  const queue = appids.filter((a) => steamProgress(a) !== null && (a >= SHORTCUTS || progress.get(a) !== null));
+  const queue = appids.filter((a) => !trophyGameHidden(a));
   refreshRetro();
   const total = queue.length;
   let done = 0;
@@ -581,7 +707,7 @@ export function cancelSync() {
   syncChanged.notify();
 }
 
-// A game's trophies listed in the XMB (Achievement Collection): read as its folder opens, the last read shown
+// A game's trophies listed in the XMB (Trophy Collection): read as its folder opens, the last read shown
 // meanwhile (opened again, it doesn't go back to Loading).
 const lists = new Map<number, Trophy[]>();
 const listsChanged = signal();
@@ -591,8 +717,20 @@ export const trophyList = (appid: number) => lists.get(appid);
 /** Reads a game's trophies while its folder is open; returns a stop. */
 export function watchTrophyList(appid: number): () => void {
   let open = true;
-  loadTrophies(appid)
-    .catch(() => [])
+  // (the list kept from before shown meanwhile, rather than Loading)
+  if (!lists.has(appid))
+    void lastTrophies(appid).then((t) => {
+      if (t && !lists.has(appid)) {
+        lists.set(appid, t);
+        listsChanged.notify();
+      }
+    });
+  // (with its groups, so it isn't listed all together and then grouped: those that take long follow when they come)
+  const known = groupsRead.has(appid);
+  const groups = loadTrophyGroups(appid);
+  if (!known) groups.then(() => listsChanged.notify());
+  Promise.all([loadTrophies(appid).catch(() => []), timeout(groups, 3000, "groups").catch(() => [])])
+    .then(([t]) => t)
     .then((t) => {
       if (!open && lists.has(appid)) return;
       const before = JSON.stringify(lists.get(appid));

@@ -1,7 +1,7 @@
 // Steam navigation / system actions used by the non-game XMB items. Every one
 // is best-effort: Steam internals move, so each has a fallback.
 import { Navigation } from "@decky/ui";
-import { findExport, lookup } from "./webpack";
+import { findExport, findLoadedExport, lookup } from "./webpack";
 
 declare const SteamClient: any;
 
@@ -55,6 +55,25 @@ export function switchToDesktop() {
     console.warn("[DeckyXMB] switch to desktop", e);
   }
   openPowerMenu();
+}
+
+// Steam's power menu offers Switch to Desktop only under gamescope (SteamOS's session); elsewhere (Big Picture on a
+// desktop) it's Exit Big Picture Mode. Not known (Steam's config not found): Switch to Desktop, as before.
+// (Its config is in modules already loaded: searching every module's code for IN_GAMESCOPE loaded each that mentions it, a
+// great many, holding the XMB's first showing up for seconds. Not loaded yet: looked for again next time, not kept as missing.)
+let config: any;
+const steamConfig = () => (config ??= findLoadedExport((v) => typeof v?.IN_GAMESCOPE === "boolean" && "IN_CLIENT" in v));
+export const inGamescope = () => steamConfig()?.IN_GAMESCOPE ?? true;
+export const canSwitchToDesktop = inGamescope;
+export const exitBigPicture = () => invoke(SteamClient?.UI, "ExitBigPictureMode") || openPowerMenu();
+
+/** Big Picture's page history (Steam's router: the window's own address doesn't follow it). */
+export function mainHistory(): any {
+  try {
+    return (globalThis as any).SteamUIStore?.WindowStore?.GamepadUIMainWindowInstance?.m_history;
+  } catch {
+    return undefined;
+  }
 }
 
 export function userName(): string {

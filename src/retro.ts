@@ -3,6 +3,7 @@
 // name. The games played on the account are asked for once, and again on Sync with Server.
 import { call } from "@decky/api";
 import type { Trophy } from "./library";
+import { save, saved } from "./saved";
 
 interface RetroGame {
   id: number;
@@ -20,8 +21,17 @@ interface Played {
 
 let played: Promise<Played | null> | null = null;
 const STATUS_KEY = "DeckyXMB.retroStatus"; // (what happened asking last: kept to look at if games don't show)
+// The list last read is kept across restarts and used at once, while it's read again behind it (once a session).
 const playedGames = () =>
-  (played ??= call<[], { games: RetroGame[] | null; error: string } | null>("retro_games")
+  (played ??= saved<RetroGame[]>("retro", "games").then((games) => {
+    const fresh = askPlayed().then((p) => {
+      if (p) played = Promise.resolve(p);
+      return p;
+    });
+    return games ? index(games) : fresh;
+  }));
+const askPlayed = () =>
+  call<[], { games: RetroGame[] | null; error: string } | null>("retro_games")
     .catch((e) => ({ games: null, error: String(e) }))
     .then((r) => {
       const status = r?.error ? `failed: ${r.error}` : `${r?.games?.length ?? 0} games`;
@@ -36,8 +46,9 @@ const playedGames = () =>
         setTimeout(() => (played = null), 60000);
         return null;
       }
+      save("retro", "games", r.games);
       return index(r.games);
-    }));
+    });
 
 /** Indexes the games with achievements (not hacks or subsets); the same game on more than one console: the one most earned in. */
 function index(games: RetroGame[]): Played {
@@ -56,7 +67,7 @@ function index(games: RetroGame[]): Played {
 }
 
 /** Ask RetroAchievements for the games played on the account again (Sync with Server). */
-export const refreshRetro = () => void (played = null);
+export const refreshRetro = () => void (played = askPlayed());
 
 // Names compared without case, punctuation or "the", with roman numerals as numbers ("Jak II: Renegade" and "Jak 2").
 const ROMAN: Record<string, string> = { ii: "2", iii: "3", iv: "4", v: "5", vi: "6", vii: "7", viii: "8", ix: "9", x: "10" };

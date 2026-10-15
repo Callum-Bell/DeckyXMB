@@ -4,6 +4,7 @@
 // audio is played here. Without ThemeDeck installed this does nothing.
 import { fromBase64 } from "./async";
 import { getSettings } from "./settings";
+import { mainHistory } from "./system";
 
 const THEMEDECK = "ThemeDeck";
 const HOVER_DELAY_MS = 800; // like the PS3, music starts once you rest on a game
@@ -97,11 +98,11 @@ function fade(audio: HTMLAudioElement, to: number, ms: number, done?: () => void
   (audio as any)._fade = id;
 }
 
-function fadeOutCurrent() {
+function fadeOutCurrent(ms = FADE_OUT_MS) {
   const p = playing;
   playing = null;
   if (!p) return;
-  fade(p.audio, 0, FADE_OUT_MS, () => {
+  fade(p.audio, 0, ms, () => {
     p.audio.pause();
     p.audio.removeAttribute("src");
     p.audio.load();
@@ -155,18 +156,8 @@ async function start(appid: number) {
 }
 
 // Steam may keep the home mounted behind other pages, so also watch the route:
-// music only belongs on the XMB and our trophy list (confirmed on device 2026-10:
-// GamepadUIMainWindowInstance.m_history.location.pathname is the live route).
+// music only belongs on the XMB and our trophy list.
 let routeWatch: any = null;
-function currentRoute(): string | null {
-  try {
-    const g: any = globalThis;
-    const main = g.SteamUIStore?.WindowStore?.GamepadUIMainWindowInstance;
-    return main?.m_history?.location?.pathname ?? null;
-  } catch {
-    return null;
-  }
-}
 const ourRoute = (path: string) => path === "/library/home" || path.startsWith("/deckyxmb/");
 function watchRoute() {
   if (routeWatch) return;
@@ -176,7 +167,7 @@ function watchRoute() {
       routeWatch = null;
       return;
     }
-    const path = currentRoute();
+    const path: string | undefined = mainHistory()?.location?.pathname;
     if (path && !ourRoute(path)) musicStop();
   }, 500);
 }
@@ -213,12 +204,26 @@ export function musicLeave() {
   stopTimer = setTimeout(() => musicStop(), STOP_GRACE_MS);
 }
 
+// A game starting (launch.ts): its music plays on through the launch, till the game is in front.
+let held = false;
+export function musicHold() {
+  held = true;
+  clearTimeout(hoverTimer);
+  clearTimeout(stopTimer);
+}
+/** The game is in front: its music fades out (over `ms`). */
+export function musicRelease(ms?: number) {
+  held = false;
+  musicStop(ms);
+}
+
 /** Stop now (e.g. a game is launching). ThemeDeck's own music is left for it to manage. */
-export function musicStop() {
+export function musicStop(ms?: number) {
+  if (held) return; // (till the game is in front)
   clearTimeout(hoverTimer);
   clearTimeout(stopTimer);
   wanted = 0;
   generation++;
-  fadeOutCurrent();
+  fadeOutCurrent(ms);
   pausedThemeDeck = null;
 }

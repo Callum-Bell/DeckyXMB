@@ -52,6 +52,25 @@ export function findExport(needle: string, test: (v: any) => boolean): any {
   return null;
 }
 
+/**
+ * First export of a module Steam has already loaded that passes `test`. Far cheaper than findExport (no module's source is
+ * read, none is loaded), for something common to much of its code, wanted while the XMB is first drawn.
+ */
+export function findLoadedExport(test: (v: any) => boolean): any {
+  const cache = getRequire()?.c;
+  if (!cache) return null;
+  for (const id of Object.keys(cache)) {
+    try {
+      const exports = cache[id]?.exports;
+      if (!exports || typeof exports !== "object") continue;
+      for (const v of Object.values(exports)) if (v && test(v)) return v;
+    } catch {
+      /* getter threw */
+    }
+  }
+  return null;
+}
+
 /** Something of Steam's, found in its code the first time it's wanted (a search of all of it): a miss is remembered too. */
 export function lookup<T>(find: () => T | null | undefined): () => T | null {
   let looked = false;

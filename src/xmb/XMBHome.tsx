@@ -5,14 +5,16 @@ import { PROFILE_COLOURS, refreshFriendProfile, refreshProfile, useFriendProfile
 import {
   describeGame,
   Game,
-  launchGame,
   openAchievements,
   takeTrophyListRequest,
   useAchievementSync,
   cancelSync,
+  launchGame,
   openGamePage,
   trophiesEarned,
   useAchievementProgress,
+  achievementsScrolled,
+  AchievementProgress,
   useAchievementProgressChanges,
   useTrophyLists,
 } from "../library";
@@ -22,10 +24,12 @@ import { musicFocus, musicLeave } from "../music";
 import { openNativeGameMenu } from "../nativeMenu";
 import { getSettings, Settings, ThemeKey, updateSettings, useSettings } from "../settings";
 import { playSound } from "../sound";
+import { isRunning, LAUNCH_ART_MS, LAUNCH_MENU_DELAY_MS, LAUNCH_MENU_MS, LAUNCH_START_MS, launchBehindXMB, setLaunchAnimator, startGame } from "../launch";
 import {
   BASE_CSS,
   consume,
   FallbackImg,
+  preloadImage,
   FONT,
   Glyph,
   hideFooter,
@@ -93,6 +97,9 @@ const SETTING = 22; // the settings disc (unselected / selected)
 const SETTING_SEL = 38;
 const BG_DELAY_MS = 900; // the PS3 waited a moment before fading in a game's background
 const FRIENDS_REFRESH_MS = 10000;
+const BACK_TRIPLE_MS = 600; // ○ three times, each within this of the last, on the XMB itself: to the Game column
+const OPTIONS_HOLD_MS = 500; // △ held this long on a game: Steam's own menu (More Options), not the PS3's
+const AHEAD = 10; // Trophy Collection: how many games either side of the selection have their progress asked for
 const FRIENDS_ONLINE_REFRESH_MS = 15000;
 
 const ratio = 215 / 460;
@@ -109,10 +116,11 @@ interface Level {
   sel: number;
 }
 
-/** A folder opened from the levels above it, on the item last selected in it. */
-function openLevel(catId: string, above: Level[], folder: Item): Level {
+/** A folder opened from the levels above it, on the item last selected in it (or, opened with ✕, the one it starts at). */
+function openLevel(catId: string, above: Level[], folder: Item, fresh = false): Level {
   const items = folder.children!();
-  const last = memory.folderSel[folderKey(catId, [...above.map((l) => l.folder.id), folder.id])];
+  const start = fresh ? folder.startAt?.() : undefined;
+  const last = items.some((it) => it.id === start) ? start : memory.folderSel[folderKey(catId, [...above.map((l) => l.folder.id), folder.id])];
   return {
     folder,
     items,
@@ -125,7 +133,7 @@ function openLevel(catId: string, above: Level[], folder: Item): Level {
 
 export function XMBHome() {
   const [s] = useSettings();
-  // △ on the trophy page: back here, that game's trophies are listed in Achievement Collection (before where you
+  // △ on the trophy page: back here, that game's trophies are listed in Trophy Collection (before where you
   // were is read, below).
   useState(() => {
     const a = takeTrophyListRequest();
@@ -228,7 +236,7 @@ export function XMBHome() {
     return out;
   });
   const [confirm, setConfirm] = useState<{ item: Item; yes: boolean } | null>(null);
-  // The side panel: a game's options (✕ on a game) or a setting's choices.
+  // The side panel: a game's options (△ on a game) or a setting's choices.
   // sub: the selection in an option's ▸ submenu, while it's open (Theme > a theme > Apply, Delete, Information).
   // column: which folders the Game column lists (△ on one of its folders).
   const [panel, setPanel] = useState<{ game?: Game; setting?: Item; actions?: PanelEntry[]; plain?: true; column?: true; sel: number; sub?: number } | null>(
@@ -243,8 +251,8 @@ export function XMBHome() {
 
   // Open folders are rebuilt when what they show changes, keeping the selection on the same item: in Settings, themes
   // (installed, switched, files found) and system settings; in Soundtracks, track lists loaded and playback; in Screenshots,
-  // the screenshots; in Network, a game's trophies (read as its folder in Achievement Collection opens). Only the column
-  // the folders are open in is looked at (Achievement Collection's games aren't read again as a network scan goes on).
+  // the screenshots; in Network, a game's trophies (read as its folder in Trophy Collection opens). Only the column
+  // the folders are open in is looked at (Trophy Collection's games aren't read again as a network scan goes on).
   const themesVer = useThemes();
   const soundtracksVer = useSoundtracks();
   const trophiesVer = useTrophyLists();
@@ -253,7 +261,7 @@ export function XMBHome() {
     settings: `${themesVer}|${systemVer}|${s.customTheme}`,
     music: soundtracksVer,
     photo: shotsVer,
-    network: `${trophiesVer}|${s.trophySort}`, // (and a game's trophies sorted again)
+    network: `${trophiesVer}|${s.trophySort}|${s.trophyGroups}|${s.trophyShowHidden}|${s.trophyHidden.join()}`, // (and a game's trophies sorted or grouped again, or games hidden)
   };
   useEffect(() => {
     setStack((st) =>
@@ -300,6 +308,17 @@ export function XMBHome() {
   // stops as it's left (backed out of, or another opened inside it).
   const openFolder = level?.folder;
   useEffect(() => openFolder?.whileOpen?.(), [openFolder?.id]);
+  // Trophy Collection: as the selection moves, its games' progress waits till it settles, then the nearest are asked first.
+  useEffect(() => {
+    if (openFolder?.id !== "achievements") return;
+    const near: number[] = [];
+    for (let k = 0; k <= AHEAD; k++)
+      for (const i of k ? [level.sel + k, level.sel - k] : [level.sel]) {
+        const appid = level.items[i]?.trophies;
+        if (appid !== undefined) near.push(appid);
+      }
+    achievementsScrolled(near);
+  }, [level?.sel, openFolder?.id]);
   // Your level and latest trophies, read again as you're selected.
   const meId = current?.me ? current.friend?.steamid : undefined;
   useEffect(() => void (meId && refreshProfile(meId)), [meId]);
@@ -368,13 +387,13 @@ export function XMBHome() {
     } else if (it.children) {
       playSound("open");
       setMotion("open");
-      setStack([...stack, openLevel(cat.id, stack, it)]);
+      setStack([...stack, openLevel(cat.id, stack, it, true)]);
     } else if (it.game) {
       const g = it.game;
-      if (s.gameAction === "launch" && g.installed) {
+      if (s.gameConfirm === "launch" && g.installed) {
         playSound("launch");
-        launchGame(g);
-      } else if (s.gameAction === "page") {
+        startGame(g);
+      } else if (s.gameConfirm === "page") {
         playSound("open");
         openGamePage(g);
       } else {
@@ -389,12 +408,14 @@ export function XMBHome() {
       const at = it.choices.options.findIndex((o) => o.value === it.choices!.current());
       setPanel({ setting: it, sel: Math.max(0, at) + (it.choices.head ? 1 : 0) });
     } else if (it.confirm) {
-      playSound("open");
+      playSound("dialog");
       // (The PS3's full-screen question starts on Yes; the small dialog on No.)
       setConfirm({ item: it, yes: !!it.confirmScreen });
-    } else {
+    } else if (it.run) {
       playSound("open");
-      it.run?.();
+      it.run();
+    } else {
+      playSound("error");
     }
   };
 
@@ -435,7 +456,7 @@ export function XMBHome() {
     playSound("back");
   };
   const runSub = (o: SubOption) => {
-    playSound("open");
+    playSound(o.confirm ? "dialog" : "open");
     if (o.info) return setInfo(o.info());
     if (o.confirm) {
       // Afterwards back to the list, on the option above the one that went (Delete).
@@ -460,6 +481,10 @@ export function XMBHome() {
     playSound("back");
     return true;
   };
+  // △ on a game, waiting to see if it's held (Steam's menu) or let go (the options panel).
+  const optionsHeld = useRef<{ game: Game; timer: ReturnType<typeof setTimeout> } | null>(null);
+  const backPresses = useRef({ n: 0, at: 0 });
+  useEffect(() => () => clearTimeout(optionsHeld.current?.timer), []);
   const h = useGamepadHandlers({
     dir: (e: any) => {
       const b = e.detail?.button;
@@ -554,6 +579,7 @@ export function XMBHome() {
         const next = catIdx + (b === GamepadButton.DIR_RIGHT ? 1 : -1);
         if (next >= 0 && next < cats.length) {
           setCatIdx(next);
+          setMotion(null); // (a folder just closed: the new category's list comes on as usual, not sliding back from the strip)
           playSound("category");
         }
       }
@@ -602,7 +628,7 @@ export function XMBHome() {
         }
         setPanel(null);
         if (entry?.confirm) {
-          playSound("open");
+          playSound("dialog");
           setConfirm({ item: { id: entry.id, label: entry.label, confirm: entry.confirm, run: () => entry.run(e) }, yes: false });
         } else if (entry) {
           playSound(entry.sound ?? "open");
@@ -638,6 +664,20 @@ export function XMBHome() {
         setMotion("close");
         setStack(stack.slice(0, -1));
         playSound("back");
+      } else {
+        // (on the XMB itself, nothing open: ○ ○ ○ goes to the Game column)
+        const now = Date.now();
+        const p = backPresses.current;
+        p.n = now - p.at < BACK_TRIPLE_MS ? p.n + 1 : 1;
+        p.at = now;
+        if (p.n < 3) return;
+        p.n = 0;
+        const game = cats.findIndex((c) => c.id === "game");
+        if (game < 0 || game === catIdx) return;
+        consume(e);
+        setCatIdx(game);
+        setMotion(null);
+        playSound("category");
       }
     },
     options: (e: any) => {
@@ -653,7 +693,7 @@ export function XMBHome() {
       if (switching || info || confirm || viewing || screen) return;
       if (panel) return closePanel();
       if (current?.options) {
-        playSound("open");
+        playSound("options");
         const { run, actions } = current.options;
         if (!actions) return run?.();
         // (△'s options: the PS3's plain list, on the one that's ticked: your status)
@@ -668,17 +708,68 @@ export function XMBHome() {
         });
       }
       if (columnMenu) {
-        playSound("open");
+        playSound("options");
         return setPanel({ column: true, sel: 0 });
       }
-      if (!current?.game) return;
-      nativeMenu(current.game, e);
+      if (!current?.game) return playSound("error");
+      // (a game's options: Play, Trophies, details…, Steam's own menu under More Options; △ held: that menu at once)
+      if (e?.detail?.button !== GamepadButton.OPTIONS) {
+        playSound("options");
+        return setPanel({ game: current.game, sel: 0 });
+      }
+      if (optionsHeld.current) return; // (repeats while held)
+      const game = current.game;
+      const target = e?.currentTarget;
+      optionsHeld.current = {
+        game,
+        timer: setTimeout(() => {
+          optionsHeld.current = null;
+          nativeMenu(game, { currentTarget: target }); // (its own sound, as Steam's menu shows)
+        }, OPTIONS_HOLD_MS),
+      };
+    },
+    up: (e: any) => {
+      const held = optionsHeld.current;
+      if (!held || e?.detail?.button !== GamepadButton.OPTIONS) return;
+      clearTimeout(held.timer);
+      optionsHeld.current = null;
+      playSound("options");
+      setPanel({ game: held.game, sel: 0 });
     },
   });
 
+  // Starting a game, as the PS3 does: the art goes, the menu zooms towards you and fades, and the game starts behind the
+  // background (launch.ts); once it's ready the background goes black but for the wave's sparkles (dark), and the game
+  // is shown. Nothing is taken meanwhile.
+  const [launching, setLaunching] = useState<Game | null>(null);
+  const [dark, setDark] = useState<number>();
+  useEffect(() => setLaunchAnimator(setLaunching), []);
+  useEffect(() => {
+    if (!launching) return;
+    let started = false;
+    const t = setTimeout(() => {
+      started = true;
+      launchBehindXMB(launching, {
+        dark: () => setDark(Date.now()),
+        done: () => {
+          // (the XMB back as it was: behind the game, or for Steam's question)
+          setLaunching(null);
+          setDark(undefined);
+        },
+      });
+    }, LAUNCH_START_MS);
+    return () => {
+      clearTimeout(t);
+      if (!started) launchGame(launching); // (gone first: started anyway)
+    };
+  }, [launching]);
+  const idle = launching ? consume : undefined;
+
   const inFolder = stack.length > 0;
-  // The background blurs inside Achievement Collection and behind a profile card (yours or a friend's).
-  const blurred = stack[0]?.folder.id === "achievements" || !!(card && current?.friend);
+  // The background blurs inside Trophy Collection, behind a profile card (yours or a friend's), and while choosing,
+  // installing or switching to a theme.
+  const themeBusy = panel?.setting?.id === "th-theme" || !!installing || themeSwitching();
+  const blurred = stack[0]?.folder.id === "achievements" || !!(card && current?.friend) || themeBusy;
   // The clock's hands wind round again each time it comes back (from a page over it, a photo, a menu), as on the PS3.
   const clockHidden = !!(panel || screen || card || asking || viewing || switching);
   const [clockShown, setClockShown] = useState(0);
@@ -693,15 +784,18 @@ export function XMBHome() {
       // @ts-ignore autoFocus exists at runtime
       autoFocus
       noFocusRing
-      onGamepadDirection={h.dir}
-      onButtonDown={h.down}
-      onOKButton={h.ok}
-      onOKActionDescription={panel || !current?.game ? "Select" : s.gameAction === "launch" && current.game.installed ? "Play" : "Open"}
-      onCancelButton={h.back}
+      onGamepadDirection={idle ?? h.dir}
+      onButtonDown={idle ?? h.down}
+      onButtonUp={idle ?? h.up}
+      onOKButton={idle ?? h.ok}
+      onOKActionDescription={
+        panel || !current?.game ? "Select" : s.gameConfirm === "launch" && current.game.installed ? (isRunning(current.game) ? "Resume" : "Play") : "Open"
+      }
+      onCancelButton={idle ?? h.back}
       onCancelActionDescription={inFolder || confirm || panel || screen || card ? "Back" : undefined}
-      onOptionsButton={h.options}
+      onOptionsButton={idle ?? h.options}
       onOptionsActionDescription={card ? undefined : (current?.options?.label ?? (current?.game || columnMenu ? "Options" : undefined))}
-      onMenuButton={h.options}
+      onMenuButton={idle ?? h.options}
       style={{ position: "absolute", inset: 0, overflow: "hidden", background: "#000" }}
     >
       <div
@@ -718,82 +812,91 @@ export function XMBHome() {
       >
         <style>{CSS}</style>
         {/* The wave fades away once a game's art has loaded over it; blurred (above), as behind the PS3's Trophy Collection. */}
-        <ThemedWave now={now} hidden={!!bgGame?.game && bgLoaded === bgGame.id} blur={blurred} theme={previewTheme} brightness={previewBrightness} />
+        <ThemedWave
+          now={now}
+          hidden={!launching && !!bgGame?.game && bgLoaded === bgGame.id}
+          blur={blurred && !launching}
+          theme={previewTheme}
+          brightness={previewBrightness}
+          dark={dark}
+        />
         {bgGame?.game && (
-          <div key={bgGame.id} className="xmb-bg">
+          <div key={bgGame.id} className="xmb-bg" style={launching ? { opacity: 0, transition: `opacity ${LAUNCH_ART_MS}ms ease-out` } : undefined}>
             <FallbackImg srcs={bgGame.game.background} style={{ width: "100%", height: "100%", objectFit: "cover" }} onLoad={() => setBgLoaded(bgGame.id)} />
             <div
               style={{ position: "absolute", inset: 0, background: "linear-gradient(90deg, rgba(0,0,0,.72) 0%, rgba(0,0,0,.5) 50%, rgba(0,0,0,.3) 100%)" }}
             />
           </div>
         )}
-        <Stage box={box}>
-          {s.clock && (
-            <div style={{ opacity: clockHidden ? 0 : 1, transition: "opacity 200ms" }}>
-              <Clock now={now} friendsOnline={friendsOnline} shown={clockShown} />
-            </div>
-          )}
-          {/* Switching theme, the XMB gives way to "Please wait..." and comes back with the new theme. */}
-          <div
-            style={{
-              position: "absolute",
-              inset: 0,
-              opacity: switching || screen || card || asking ? 0 : 1,
-              transition: switching || screen || card || asking ? "opacity 200ms ease-out" : "opacity 500ms ease-in",
-            }}
-          >
-            <CategoryBar cats={cats} catIdx={catIdx} inFolder={inFolder} />
-            {inFolder && (
-              <ParentColumn
-                items={stack.length > 1 ? stack[stack.length - 2].items : cat.items}
-                sel={stack.length > 1 ? stack[stack.length - 2].sel : rootSel}
-                inFolder={stack.length > 1}
-                // (opening: each comes from where it was in the column, itself in a folder if this one's inside another)
-                from={motion === "open" ? (it, d) => columnBox(it, d, stack.length > 1) : undefined}
-              />
+        <div className={launching ? "xmb-launch" : undefined} style={{ position: "absolute", inset: 0 }}>
+          <Stage box={box}>
+            {s.clock && (
+              <div style={{ opacity: clockHidden ? 0 : 1, transition: "opacity 200ms" }}>
+                <Clock now={now} friendsOnline={friendsOnline} shown={clockShown} />
+              </div>
             )}
-            {/* While choosing a setting the list dims and its values hide, as on the PS3. */}
-            <div className="xmb-anim" style={{ position: "absolute", inset: 0, opacity: panel?.setting ? 0.45 : 1 }}>
-              {grid ? (
-                <PictureGrid key={`f:${level!.folder.id}`} items={items} sel={sel} motion={motion} />
-              ) : (
-                <Column
-                  key={level ? `f:${level.folder.id}` : `c:${cat.id}`}
-                  items={items}
-                  sel={sel}
-                  inFolder={inFolder}
-                  hideValues={!!panel?.setting || !!panel?.plain} // (and your trophies and level, under your status list)
-                  zoom={zoom}
-                  motion={motion}
+            {/* Switching theme, the XMB gives way to "Please wait..." and comes back with the new theme. */}
+            <div
+              style={{
+                position: "absolute",
+                inset: 0,
+                opacity: switching || screen || card || asking ? 0 : 1,
+                transition: switching || screen || card || asking ? "opacity 200ms ease-out" : "opacity 500ms ease-in",
+              }}
+            >
+              <CategoryBar cats={cats} catIdx={catIdx} inFolder={inFolder} />
+              {inFolder && (
+                <ParentColumn
+                  items={stack.length > 1 ? stack[stack.length - 2].items : cat.items}
+                  sel={stack.length > 1 ? stack[stack.length - 2].sel : rootSel}
+                  inFolder={stack.length > 1}
+                  // (opening: each comes from where it was in the column, itself in a folder if this one's inside another)
+                  from={motion === "open" ? (it, d) => columnBox(it, d, stack.length > 1) : undefined}
                 />
               )}
+              {/* While choosing a setting the list dims and its values hide, as on the PS3. */}
+              <div className="xmb-anim" style={{ position: "absolute", inset: 0, opacity: panel?.setting ? 0.45 : 1 }}>
+                {grid ? (
+                  <PictureGrid key={`f:${level!.folder.id}`} items={items} sel={sel} motion={motion} />
+                ) : (
+                  <Column
+                    key={level ? `f:${level.folder.id}` : `c:${cat.id}`}
+                    items={items}
+                    sel={sel}
+                    inFolder={inFolder}
+                    hideValues={!!panel?.setting || !!panel?.plain} // (and your trophies and level, under your status list)
+                    zoom={zoom}
+                    motion={motion}
+                  />
+                )}
+              </div>
+              {panel && swatch && <ColourPanel entries={panelItems} sel={panel.sel} swatch={swatch} />}
+              {/* Plain lists of names: Theme (with Install above), Brightness, Deep Blacks. */}
+              {panel && !swatch && plainList && (
+                <ListPanel
+                  entries={panelItems}
+                  sel={panel.sel}
+                  sub={
+                    subOptions && panel.sub !== undefined
+                      ? { options: subOptions, sel: panel.sub, picture: panel.setting?.choices?.picture?.(panelItems[panel.sel].id) }
+                      : undefined
+                  }
+                />
+              )}
+              {panel && !swatch && !plainList && <OptionsPanel entries={panelItems} sel={panel.sel} />}
             </div>
-            {panel && swatch && <ColourPanel entries={panelItems} sel={panel.sel} swatch={swatch} />}
-            {/* Plain lists of names: Theme (with Install above), Brightness, Deep Blacks. */}
-            {panel && !swatch && plainList && (
-              <ListPanel
-                entries={panelItems}
-                sel={panel.sel}
-                sub={
-                  subOptions && panel.sub !== undefined
-                    ? { options: subOptions, sel: panel.sub, picture: panel.setting?.choices?.picture?.(panelItems[panel.sel].id) }
-                    : undefined
-                }
-              />
-            )}
-            {panel && !swatch && !plainList && <OptionsPanel entries={panelItems} sel={panel.sel} />}
-          </div>
-          {installing ? <InstallScreen p={installing} /> : sync ? <SyncScreen p={sync} /> : switching && <PleaseWait title="Theme" icon="theme" />}
-          {screen && <InfoScreen {...screen} />}
-          {card &&
-            current?.friend &&
-            (current.me ? (
-              <ProfileScreen me={current.friend} colour={card.pick !== undefined ? PROFILE_COLOURS[card.pick] : s.profileColour} pick={card.pick} />
-            ) : (
-              <FriendProfileScreen friend={current.friend} />
-            ))}
-          {asking && <ConfirmScreen text={confirm!.item.confirm!} yes={confirm!.yes} />}
-        </Stage>
+            {installing ? <InstallScreen p={installing} /> : sync ? <SyncScreen p={sync} /> : switching && <PleaseWait title="Theme" icon="theme" />}
+            {screen && <InfoScreen {...screen} />}
+            {card &&
+              current?.friend &&
+              (current.me ? (
+                <ProfileScreen me={current.friend} colour={card.pick !== undefined ? PROFILE_COLOURS[card.pick] : s.profileColour} pick={card.pick} />
+              ) : (
+                <FriendProfileScreen friend={current.friend} />
+              ))}
+            {asking && <ConfirmScreen text={confirm!.item.confirm!} yes={confirm!.yes} />}
+          </Stage>
+        </div>
         {confirm && !asking && <Confirm text={confirm.item.confirm!} yes={confirm.yes} />}
         {info && <InfoDialog title={info.title} lines={info.lines} />}
         {viewing && current?.picture && (
@@ -878,7 +981,10 @@ function CategoryBar({ cats, catIdx, inFolder }: { cats: Category[]; catIdx: num
 }
 
 /** Landscape art to draw an item with (a game's, or a soundtrack's), if any. */
-const artOf = (item: Item) => item.game?.icon ?? item.art;
+const PRELOAD = 15; // rows either side of the selection whose pictures are got ready (preloadImage)
+/** A game's logo (Theme Settings > Game Icons: Logo), drawn whole and see-through rather than as capsule art. */
+const logoOf = (item: Item) => (getSettings().gameArt === "logo" ? (item.game?.logo ?? item.logo) : undefined);
+const artOf = (item: Item) => logoOf(item) ?? item.game?.icon ?? item.art;
 
 /** A small picture of an item: its glyph, or a game's landscape art. */
 function ItemIcon({ item, size }: { item: Item; size: number }) {
@@ -889,11 +995,17 @@ function ItemIcon({ item, size }: { item: Item; size: number }) {
       </div>
     );
   }
-  const art = artOf(item);
+  const logos = logoOf(item);
+  const art = logos ?? item.game?.icon ?? item.art; // (artOf, the logo setting read once)
   if (art) {
+    const logo = !!logos;
     return (
       <div style={{ width: size * 2, height: size }}>
-        <FallbackImg srcs={art} style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: 2 }} fallback={<GameTile name="" />} />
+        <FallbackImg
+          srcs={art}
+          style={{ width: "100%", height: "100%", objectFit: logo ? "contain" : "cover", borderRadius: logo ? 0 : 2 }}
+          fallback={<GameTile name="" />}
+        />
       </div>
     );
   }
@@ -1018,6 +1130,10 @@ function Column({
   motion?: "open" | "close" | null;
 }) {
   const x = inFolder ? F_COL_X : COL_X;
+  // The pictures of the rows a few moves away fetched and decoded meanwhile, so they're ready as they slide on.
+  useEffect(() => {
+    for (const it of items.slice(Math.max(0, sel - PRELOAD), sel + PRELOAD + 1)) preloadImage(artOf(it) ?? it.cover);
+  }, [items, sel]);
   if (!items.length) {
     // (in the column, where the first item would be: centred under the category, just below the bar)
     return (
@@ -1177,13 +1293,17 @@ function Row({
   zoom?: boolean;
   motion?: "open" | "close" | null;
 }) {
-  // How a row came on stays its class for as long as it's shown: changing it once the folder has finished opening or
-  // closing would start the new animation over (the fade-in, the whole column blinking).
-  const entered = useRef(motion === "open" ? "xmb-enter-late" : motion === "close" ? "xmb-travel" : "xmb-enter").current;
+  // How a row came on is kept, not worked out again as the folder finishes opening or closing (which would start a new
+  // animation over: the fade-in, the whole column blinking); once played it's dropped, so it can't be played again.
+  const [entered, setEntered] = useState(motion === "open" ? "xmb-enter-late" : motion === "close" ? "xmb-travel" : "xmb-enter");
+  const from = useRef<Record<string, string | number>>();
   if (item.friend) return <FriendRow friend={item.friend} me={!!item.me} d={d} x={x} inFolder={inFolder} hideExtras={!!hideValue} />;
   const on = d === 0;
-  const art = artOf(item);
+  const logos = logoOf(item);
+  const art = logos ?? item.game?.icon ?? item.art; // (artOf, the logo setting read once)
   const isGame = !!art;
+  const logo = !!logos;
+  const listed = item.trophies !== undefined || !!item.groupProgress; // (a Trophy Collection entry: its progress beside it)
   const cover = item.cover;
   const w = zoom
     ? isGame
@@ -1227,10 +1347,19 @@ function Row({
   // A folder opening, its contents fade in once the column has slid aside; closing, the column it was in
   // grows back out of the strip, each item from its small icon there.
   const cls = `xmb-anim ${entered}`;
-  const back = motion === "close" ? travel({ cx: iconLeft + w / 2, cy: top + hgt / 2, w, h: hgt }, stripBox(item, d, inFolder), [0, top], F_STRIP_OPACITY) : {};
+  // (Where it grows from is kept from when it came, as `entered` is: moved on meanwhile, the selection changing, it
+  // would otherwise jump to growing from another place in the strip, the selected one's, drawn large over the list.)
+  const back =
+    entered === "xmb-travel"
+      ? (from.current ??= travel({ cx: iconLeft + w / 2, cy: top + hgt / 2, w, h: hgt }, stripBox(item, d, inFolder), [0, top], F_STRIP_OPACITY))
+      : {};
 
   return (
-    <div className={cls} style={{ position: "absolute", left: 0, top: 0, transform: `translateY(${top}px)`, opacity, ...back }}>
+    <div
+      className={cls}
+      style={{ position: "absolute", left: 0, top: 0, transform: `translateY(${top}px)`, opacity, ...back }}
+      onAnimationEnd={(e) => e.target === e.currentTarget && setEntered("")}
+    >
       <div
         className="xmb-anim"
         style={
@@ -1254,9 +1383,12 @@ function Row({
             style={{
               width: "100%",
               height: "100%",
-              objectFit: "cover",
-              borderRadius: (isGame ? 3 : 2) / scale,
-              boxShadow: on ? "0 0 24px rgba(255,255,255,.35)" : `0 ${2 / scale}px ${8 / scale}px rgba(0,0,0,.4)`,
+              objectFit: logo ? "contain" : "cover",
+              borderRadius: logo ? 0 : (isGame ? 3 : 2) / scale,
+              // (a cover's or logo's shadow follows its shape, for a picture that's see-through: the padlock's glass tile)
+              ...(isGame && !logo
+                ? { boxShadow: on ? "0 0 24px rgba(255,255,255,.35)" : `0 ${2 / scale}px ${8 / scale}px rgba(0,0,0,.4)` }
+                : { filter: on ? "drop-shadow(0 0 12px rgba(255,255,255,.35))" : `drop-shadow(0 ${2 / scale}px ${4 / scale}px rgba(0,0,0,.4))` }),
             }}
             fallback={<GameTile name={item.label} />}
           />
@@ -1282,7 +1414,7 @@ function Row({
           flexDirection: "column",
           justifyContent: "center",
           whiteSpace: "nowrap",
-          opacity: isGame && !on && item.trophies === undefined ? 0 : 1, // (the Achievement Collection names every game)
+          opacity: isGame && !on && !listed ? 0 : 1, // (the Trophy Collection names every game, and a game's groups)
           transform: textShift,
         }}
       >
@@ -1296,7 +1428,7 @@ function Row({
             className={on ? "xmb-text xmb-pulse" : "xmb-text"}
             style={{
               fontSize: zoom ? 22 : on ? 25 : 20,
-              maxWidth: item.trophies !== undefined ? TROPHY_RIGHT - TROPHY_W - textLeft - VALUE_GAP : choice ? VALUE_X - textLeft - VALUE_GAP : 760,
+              maxWidth: listed ? TROPHY_RIGHT - TROPHY_W - textLeft - VALUE_GAP : choice ? VALUE_X - textLeft - VALUE_GAP : 760,
               transition: "font-size 190ms cubic-bezier(.2,.7,.3,1)",
             }}
           />
@@ -1307,7 +1439,8 @@ function Row({
           </div>
         )}
       </div>
-      {item.trophies !== undefined && <TrophyProgress appid={item.trophies} on={on} height={hgt} />}
+      {item.trophies !== undefined && <GameProgress appid={item.trophies} on={on} height={hgt} />}
+      {item.groupProgress && <TrophyProgress p={item.groupProgress} on={on} height={hgt} />}
       {/* A setting's current value, in its own column as on the PS3. */}
       {choice && (
         <div
@@ -1347,10 +1480,13 @@ function Row({
 const TROPHY_RIGHT = 1120;
 const TROPHY_W = 110;
 
-function TrophyProgress({ appid, on, height }: { appid: number; on: boolean; height: number }) {
+function GameProgress({ appid, on, height }: { appid: number; on: boolean; height: number }) {
   const p = useAchievementProgress(appid);
   const late = useRef(p === undefined); // (not known as its row came on: it fades in, rather than appearing)
-  if (!p) return null;
+  return p ? <TrophyProgress p={p} on={on} height={height} late={late.current} /> : null;
+}
+
+function TrophyProgress({ p, on, height, late }: { p: AchievementProgress; on: boolean; height: number; late?: boolean }) {
   const pct = Math.floor((p.achieved / p.total) * 100);
   return (
     <div
@@ -1367,7 +1503,7 @@ function TrophyProgress({ appid, on, height }: { appid: number; on: boolean; hei
         alignItems: "center", // (centred over where the bar is, selected or not, so it never moves)
         opacity: on ? 1 : 0.85,
         whiteSpace: "nowrap",
-        animation: late.current ? "xmbFade .35s ease-out" : undefined,
+        animation: late ? "xmbFade .35s ease-out" : undefined,
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: on ? 19 : 17 }}>
@@ -1784,13 +1920,13 @@ interface PanelEntry {
   run: (e?: any) => void;
 }
 
-/** The PS3-style options for a game: Play, Achievements, details, Steam's own menu. */
+/** The PS3-style options for a game (△): Play, Trophies, details, Steam's own menu. */
 function gameOptions(g: Game, nativeMenu: (g: Game, e?: any) => void): PanelEntry[] {
   const out: PanelEntry[] = [];
-  if (g.installed) out.push({ id: "play", label: "Play", icon: "play", sound: "launch", run: () => launchGame(g) });
+  if (g.installed) out.push({ id: "play", label: isRunning(g) ? "Resume" : "Play", icon: "game", sound: "launch", run: () => startGame(g) });
   else out.push({ id: "install", label: "Install", sub: "Opens the game page", icon: "download", run: () => openGamePage(g) });
   // (the trophy list says if there are none)
-  out.push({ id: "ach", label: "Achievements", icon: "trophy", run: () => openAchievements(g) });
+  out.push({ id: "ach", label: "Trophies", icon: "trophy", run: () => openAchievements(g) });
   out.push({ id: "page", label: "Game Details", icon: "info", run: () => openGamePage(g) });
   // (between the Game and Video columns: listed in one or the other)
   const videos = getSettings().videoGames;
@@ -2548,12 +2684,16 @@ const CSS = `${BASE_CSS}
 .xmb-busy { animation: xmbBusy 1s steps(8) infinite; filter: drop-shadow(0 1px 2px rgba(0,0,0,.5)); }
 @keyframes xmbBusy { to { transform: rotate(360deg); } }
 @keyframes xmbBg { from { opacity: 0; } to { opacity: .9; } }
+/* Starting a game: the menu zooms towards you and fades, once the art has gone (launch.ts). */
+.xmb-launch { transform-origin: 50% 45%; animation: xmbLaunch ${LAUNCH_MENU_MS}ms ease-in ${LAUNCH_MENU_DELAY_MS}ms forwards; }
+@keyframes xmbLaunch { to { opacity: 0; transform: scale(1.3); } }
 @keyframes xmbSlide { from { opacity: 0; transform: translateX(40px); } }
 /* Folders: an item travels from where it was (--from, set on it) to where it's drawn, as the PS3's column slides into
-   the strip beside an open folder and back out; the folder's contents fade in once it has. */
+   the strip beside an open folder and back out; the folder's contents fade in once it has. (Held only until they've
+   played, "backwards": one still held over a row's transform or opacity would stop them easing as the list moves.) */
 @keyframes xmbTravel { from { transform: var(--from); opacity: var(--from-o, 1); } }
-.xmb-travel { transform-origin: 0 0; animation: xmbTravel ${FOLDER_MS}ms cubic-bezier(.2,.7,.3,1) both; }
-.xmb-enter-late { animation: xmbFade 160ms ease-out ${FOLDER_IN_DELAY_MS}ms both; }
+.xmb-travel { transform-origin: 0 0; animation: xmbTravel ${FOLDER_MS}ms cubic-bezier(.2,.7,.3,1) backwards; }
+.xmb-enter-late { animation: xmbFade 160ms ease-out ${FOLDER_IN_DELAY_MS}ms backwards; }
 .xmb-wait { animation: xmbFade 250ms ease-out 150ms both; }
 /* Selected text too long to fit, scrolled to its end and back (Marquee). */
 .xmb-marquee { display: inline-block; will-change: transform; }

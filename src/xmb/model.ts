@@ -11,6 +11,8 @@ import {
   gameByAppid,
   openAchievements,
   showTrophyPage,
+  hideTrophyGame,
+  trophyGameHidden,
   knownAchievementProgress,
   syncAchievements,
   openGamePage,
@@ -18,6 +20,9 @@ import {
   refreshAchievementProgress,
   Trophy,
   trophyList,
+  trophySections,
+  countOf,
+  AchievementProgress,
   watchTrophyList,
   soundtracks,
   sortTrophies,
@@ -115,6 +120,7 @@ import {
 import { checkForUpdates, finishUpdate, installUpdates, updateStatus, UpdateState, updatesSupported } from "../updates";
 import { applyTheme, browseTheme, deleteTheme, installedThemes, themePreview } from "../themes";
 import { IconName } from "./icons";
+import { LOCKED_TROPHY } from "./locked";
 import { Tier, tierOf } from "./TrophyPage";
 import { GLYPH_SETS } from "../glyphs";
 import { BRIGHTNESS_OPTIONS, COLOUR_OPTIONS, rgb, swatchColor } from "./theme";
@@ -128,12 +134,14 @@ export interface Item {
   badge?: boolean; // the PS3's small wrench disc on Settings-column icons
   game?: Game;
   art?: string[]; // landscape art, drawn like a game's
+  logo?: string[]; // (in place of art, with Game Icons: Logo) a game's logo, then its art
   cover?: string[]; // square art in place of the icon (a soundtrack's album cover)
   run?: () => void;
   confirm?: string; // ask before running (power actions)
   confirmScreen?: boolean; // ask it as the PS3 does turning off: the whole screen, not a dialog over the XMB
   children?: () => Item[]; // a folder: ✕ opens it as a nested column
   whileOpen?: () => () => void; // a folder: started as it's opened, the stop it returns called as it's left
+  startAt?: () => string | undefined; // a folder: the id of the item it opens on (✕ on it), not the one last selected
   choices?: Choices; // a setting: ✕ opens its options in the side panel
   friend?: Friend; // a Steam friend: drawn as a PS3 friend entry
   me?: true; // you, atop the friends: ✕ shows your profile
@@ -142,7 +150,8 @@ export interface Item {
   screen?: { title: string; icon: IconName; lines: () => Promise<[string, string][]>; pending?: () => [string, string][] }; // ✕ shows a PS3 information screen (System Information); pending: its lines till then
   trophy?: { tier: Tier; earned: boolean }; // one of a game's trophies, listed in the XMB: its cup beside its name
   options?: { label: string; run?: () => void; actions?: () => Action[] }; // △ does this, or opens these in the side panel
-  trophies?: number; // an Achievement Collection entry (this app's): its name always shown, its progress beside it
+  trophies?: number; // a Trophy Collection entry (this app's): its name always shown, its progress beside it
+  groupProgress?: AchievementProgress; // one of a game's trophy groups (a DLC's): shown as an entry, with its own progress
   picture?: string; // a screenshot: ✕ shows it full screen (◀ ▶ through the others beside it)
 }
 
@@ -270,6 +279,12 @@ const themeFolder: Item = {
       rgb(swatchColor(v as ThemeKey)),
     ),
     brightnessItem(),
+    plainItem(
+      settingItem("th-game-art", "Game Icons", "Shows each game as its capsule art, or as its logo.", "gameArt", {
+        capsule: "Capsule",
+        logo: "Logo",
+      }),
+    ),
     plainItem(
       settingItem(
         "th-resolution",
@@ -840,13 +855,34 @@ function trophyItems(g: Game): Item[] {
         : { id: "tro-none", label: "No achievements", icon: "info", description: "This game has no achievements.", options },
     ];
   }
+  // Group Content: a folder for the base game and one for each DLC (or update), as the PS3 lists a game's add-on packs.
+  const sections = trophySections(g, list);
+  if (sections)
+    return sections.map((sec) => ({
+      id: `grp:${sec.key}`,
+      label: sec.name,
+      art: sec.art,
+      groupProgress: countOf(sec.trophies),
+      options,
+      children: () => {
+        // (Group Content turned off in here: all of them)
+        const now = trophyList(g.appid) ?? [];
+        const secs = trophySections(g, now);
+        return trophyRows(g, secs ? (secs.find((k) => k.key === sec.key)?.trophies ?? []) : now);
+      },
+    }));
+  return trophyRows(g, list);
+}
+
+function trophyRows(g: Game, list: Trophy[]): Item[] {
+  const options = { label: "Options", actions: () => trophyOptions(g) };
   return sortTrophies(list, getSettings().trophySort, trophyLabel).map((t) => {
     const secret = t.hidden && !t.achieved;
     return {
       id: `tro:${t.id}`,
       label: trophyLabel(t),
       icon: "trophy" as IconName,
-      ...(!secret && t.image ? { cover: [t.image] } : {}),
+      ...(!t.achieved ? { cover: [LOCKED_TROPHY] } : t.image ? { cover: [t.image] } : {}), // (the PS3's padlock till it's earned)
       description: [secret ? "" : t.description, t.achieved && t.unlocked ? formatDateTime(t.unlocked) : ""].filter(Boolean).join("\n") || undefined,
       trophy: { tier: tierOf(t), earned: t.achieved },
       options,
@@ -856,10 +892,26 @@ function trophyItems(g: Game): Item[] {
 
 const trophyLabel = (t: Trophy) => (t.hidden && !t.achieved ? "Hidden Achievement" : t.name);
 
-/** △ on a game's trophies: the PS3's options (Group Content is only a placeholder: Steam's achievements have no groups). */
+/** △ on a game's trophies: the PS3's options. Group Content only for a game whose trophies came in groups (DLC). */
 function trophyOptions(g: Game): Action[] {
+  const on = getSettings().trophyGroups;
+  const grouped = !!trophySections(g, trophyList(g.appid) ?? [], undefined, true);
   return [
-    { id: "group", label: "Group Content", icon: "folder", run: () => {} },
+    ...(grouped
+      ? [
+          {
+            id: "group",
+            label: "Group Content",
+            icon: "folder" as IconName,
+            zoom: true,
+            more: [
+              { id: "on", label: "On", checked: on, run: () => updateSettings({ trophyGroups: true }) },
+              { id: "off", label: "Off", checked: !on, run: () => updateSettings({ trophyGroups: false }) },
+            ],
+            run: () => {},
+          },
+        ]
+      : []),
     {
       id: "sort",
       label: "Sort By",
@@ -873,26 +925,70 @@ function trophyOptions(g: Game): Action[] {
 }
 
 /**
- * Network > Achievement Collection (the PS3's Trophy Collection): every game, by name, with how much of it you've
- * earned beside it (asked for as each comes on screen); ✕ opens its trophies, as they were last shown (△ switches).
+ * △ on a game in Trophy Collection: hide it (or unhide it, its achievements looked for again), the hidden games listed or
+ * not, and Sync with Server. Games found to have no achievements are hidden by themselves.
+ */
+function collectionGameOptions(g: Game): Action[] {
+  const hidden = trophyGameHidden(g.appid);
+  const show = getSettings().trophyShowHidden;
+  return [
+    hidden
+      ? {
+          id: "unhide",
+          label: "Unhide Game",
+          ...(knownAchievementProgress(g.appid) === null ? { sub: "No achievements found" } : {}),
+          icon: "trophy",
+          run: () => hideTrophyGame(g.appid, false),
+        }
+      : { id: "hide", label: "Hide Game", icon: "trophy", run: () => hideTrophyGame(g.appid, true) },
+    {
+      id: "show",
+      label: "Show Hidden Games",
+      icon: "setting",
+      more: [
+        { id: "on", label: "On", checked: show, run: () => updateSettings({ trophyShowHidden: true }) },
+        { id: "off", label: "Off", checked: !show, run: () => updateSettings({ trophyShowHidden: false }) },
+      ],
+      run: () => {},
+    },
+    { id: "sync", label: "Sync with Server", icon: "update", run: () => syncAchievements(allGameIds()) },
+  ];
+}
+
+/** The games Trophy Collection lists: less those hidden, unless they're shown. */
+const listedTrophyGames = (games: Game[]) => (getSettings().trophyShowHidden ? games : games.filter((g) => !trophyGameHidden(g.appid)));
+
+/**
+ * Network > Trophy Collection: every game, by name, with how much of it you've earned beside it (asked for as each
+ * comes on screen); ✕ opens its trophies, as they were last shown (△ switches). It opens on the game played last
+ * (the Game column's order: not one moved to Video) that's listed and not known to have no achievements.
  * `games`: the library by name, read once as the column's built (not again as it opens, nor as each trophy list loads).
  */
 const achievementFolder = (games: () => Game[]): Item => ({
   id: "achievements",
-  label: "Achievement Collection",
+  label: "Trophy Collection",
   icon: "cup",
+  startAt: () => {
+    const s = getSettings();
+    const last = notVideo(recentGames(s.installedOnly)).find(
+      (g) => (s.trophyShowHidden || !trophyGameHidden(g.appid)) && knownAchievementProgress(g.appid) !== null,
+    );
+    return last && `ach:${last.appid}`;
+  },
   options: {
     label: "Options",
     actions: () => [{ id: "sync", label: "Sync with Server", icon: "update", run: () => syncAchievements(allGameIds()) }],
   },
   // (by name, as they're listed: those not known yet are asked for in the order they're scrolled to)
-  whileOpen: () => refreshAchievementProgress(games().map((g) => g.appid)),
+  whileOpen: () => refreshAchievementProgress(listedTrophyGames(games()).map((g) => g.appid)),
   children: () =>
-    games().map((g) => ({
+    listedTrophyGames(games()).map((g) => ({
       id: `ach:${g.appid}`,
       label: g.name,
       art: g.icon,
+      logo: g.logo,
       trophies: g.appid,
+      options: { label: "Options", actions: () => collectionGameOptions(g) },
       ...(getSettings().trophyCollection === "xmb"
         ? { whileOpen: () => watchTrophyList(g.appid), children: () => trophyItems(g) }
         : { run: () => openAchievements(g, true) }),
@@ -933,11 +1029,11 @@ export function buildCategories(s: Pick<Settings, "installedOnly" | "gameFavorit
         { id: "restart", label: "Restart System", icon: "restart", confirm: "Do you want to restart the system?", confirmScreen: true, run: sys.restart },
         {
           id: "desktop",
-          label: "Switch to Desktop",
           icon: "desktop",
-          confirm: "Do you want to switch to Desktop Mode?",
           confirmScreen: true,
-          run: sys.switchToDesktop,
+          ...(sys.canSwitchToDesktop()
+            ? { label: "Switch to Desktop", confirm: "Do you want to switch to Desktop Mode?", run: sys.switchToDesktop }
+            : { label: "Exit Big Picture Mode", confirm: "Do you want to exit Big Picture Mode?", run: sys.exitBigPicture }),
         },
         { id: "off", label: "Turn Off System", icon: "power", confirm: "Do you want to turn off the system?", confirmScreen: true, run: sys.shutdown },
       ],
@@ -997,7 +1093,7 @@ export const settingsCategory = (): Category => ({
       controllerFolder,
       bluetoothFolder,
       networkFolder,
-      { id: "s-qam", label: "Quick Access", sub: "Decky plugins and quick settings", icon: "settings", run: sys.openQuickAccess },
+      { id: "s-qam", label: "Quick Access", sub: "Decky plugins and quick settings", icon: "quick", run: sys.openQuickAccess },
       { id: "s-all", label: "All Settings", icon: "settings", run: sys.go("/settings") },
     ]),
   ],

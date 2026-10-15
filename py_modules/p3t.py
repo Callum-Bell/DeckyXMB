@@ -209,6 +209,37 @@ def _install_scene(blob: bytes, dest: str) -> bool:
     except Exception:
         return False
 
+SOUND_BOOST_MAX = 16  # the most a quiet sound is made louder by
+
+
+def _install_sounds(tree: list, dest: str) -> list:
+    """
+    The theme's sound effects (its setable: se_cursor, se_decide...) as sounds/<id>.wav; their ids.
+    Some themes record a few of them far quieter than the rest (PAIN's cursor is a tenth as loud as its cancel),
+    so each is brought up to the loudest one's level.
+    """
+    import vag  # py_modules/vag.py
+
+    decoded = {}
+    for _, n, a in tree:
+        if n == "se" and isinstance(a.get("src"), FileRef) and a.get("id") and a["id"] not in decoded:
+            try:
+                rate, samples = vag.decode(a["src"].read())
+            except Exception:
+                continue  # skip a sound we can't read rather than the whole theme
+            if samples:
+                decoded[a["id"]] = (rate, samples, vag.peak(samples))
+    if not decoded:
+        return []
+    loudest = max(p for _, _, p in decoded.values())
+    os.makedirs(os.path.join(dest, "sounds"), exist_ok=True)
+    for sid, (rate, samples, p) in decoded.items():
+        gain = min(loudest / p, SOUND_BOOST_MAX) if p else 1.0
+        with open(os.path.join(dest, "sounds", os.path.basename(sid) + ".wav"), "wb") as f:
+            f.write(vag.wav(rate, samples, gain))
+    return list(decoded)
+
+
 def theme_id(name: str, data: bytes) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:40] or "theme"
     return f"{slug}-{zlib.crc32(data) & 0xFFFFFFFF:08x}"
@@ -216,7 +247,7 @@ def theme_id(name: str, data: bytes) -> str:
 
 def install(path: str, root: str, data: bytes = None) -> dict:
     """
-    Unpack a .p3t into root/<id>/: theme.json, icons/<ps3 id>.png, the background
+    Unpack a .p3t into root/<id>/: theme.json, icons/<ps3 id>.png, sounds/<ps3 id>.wav, the background
     (background.jpg; a dynamic theme with no still image uses its preview, background.png),
     its preview (screenshot.png) and the theme's own icon (thumb.png). `data` is the .p3t when it came out of a package.
     """
@@ -277,6 +308,8 @@ def install(path: str, root: str, data: bytes = None) -> dict:
         except Exception:
             pass
 
+    sounds = _install_sounds(tree, dest)
+
     meta = {
         "id": tid,
         "name": name,
@@ -287,6 +320,7 @@ def install(path: str, root: str, data: bytes = None) -> dict:
         "background": background,
         "dynamic": dynamic,
         "scene": scene,  # its animated scene could be unpacked (else the still background is used)
+        "sounds": sounds,
     }
     with open(os.path.join(dest, "theme.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
